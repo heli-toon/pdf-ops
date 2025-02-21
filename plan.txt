@@ -1,0 +1,11 @@
+Add as many pdf function related scripts.
+
+Create a UI w/ Flet for all scripts
+
+Merge PDF
+Convert PDF to Word, Image etc.
+Convert Word, Image, PowerPoint to PDF
+Encrpt PDF
+Scan PDF
+Edit PDF
+
