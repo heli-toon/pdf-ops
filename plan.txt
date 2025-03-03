@@ -9,3 +9,14 @@ Encrpt PDF
 Scan PDF
 Edit PDF
 
+Map
+pdf-ops
+|
+|-- main.py # main Flet app
+|-- convert.py # PDF to / from Word/Image
+|-- edit.py # Add Text or watermark
+|-- utils.py # helper functions
+|-- requirements.txt
+|-- assets/ # icons, images, fonts etc.
+
+Save to dialog after converting.
