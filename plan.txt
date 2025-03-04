@@ -1,13 +1,22 @@
 Add as many pdf function related scripts.
+PDF to Word ✅
+PDF to Image
+PDF to PowerPoint
+PDF to Excel
 
-Create a UI w/ Flet for all scripts
+Word to PDF
+Image to PDF
+PowerPoint to PDF
+Excel to PDF
 
 Merge PDF
-Convert PDF to Word, Image etc.
-Convert Word, Image, PowerPoint to PDF
+Compress PDF
 Encrpt PDF
 Scan PDF
 Edit PDF
+
+Create a UI w/ Flet for all scripts
+Convert Word, Image, PowerPoint to PDF
 
 Map
 pdf-ops
@@ -19,4 +28,5 @@ pdf-ops
 |-- requirements.txt
 |-- assets/ # icons, images, fonts etc.
 
+Output Folder to ~/Documents/PDF-OPS/
 Save to dialog after converting.
