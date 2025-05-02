@@ -198,4 +198,4 @@ class PDFOpsApp:
 
 if __name__ == "__main__":
     app = PDFOpsApp()
-    ft.app(target=app.main)
+    ft.app(target=app.main, view=ft.FLET_APP)

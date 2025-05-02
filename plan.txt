@@ -1,8 +1,8 @@
 Add as many pdf function related scripts.
 PDF to Word ✅
-PDF to Image
-PDF to PowerPoint
-PDF to Excel
+PDF to Image ✅
+PDF to PowerPoint ✅
+PDF to Excel ✅
 
 Word to PDF
 Image to PDF
@@ -30,3 +30,15 @@ pdf-ops
 
 Output Folder to ~/Documents/PDF-OPS/
 Save to dialog after converting.
+
+ft.app(target=main, view=ft.WEB_BROWSER)
+
+Package as Windows app and Web app
+flet pack main.py
+
+Use pyinstaller or flet pack
+
+icon.ico
+pyinstaller --onefile --windowed --icon=icon.ico main.py
+
+# pyinstaller --clean --noconfirm --onefile --windowed --icon=icon.ico main.py
