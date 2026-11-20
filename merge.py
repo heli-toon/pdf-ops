@@ -1,15 +1,15 @@
 import flet as ft
 import os
-import threading
 import time
 import PyPDF2
-import fitz  # PyMuPDF
+import pymupdf as fitz
 
 from utils import (
     generate_output_filename, 
     show_snackbar, 
     update_progress, 
-    reset_progress
+    reset_progress,
+    run_background,
 )
 
 class PDFMerger:
@@ -25,32 +25,40 @@ class PDFMerger:
         
         # File picker for selecting multiple PDFs
         self.pdf_picker = ft.FilePicker(on_result=self.on_pdfs_selected)
-        self.page.overlay.append(self.pdf_picker)
+        self.page.services.append(self.pdf_picker)
+
+    def set_current_file(self, file_path):
+        """Receive the active file selection from the application shell."""
+        self.current_file = file_path
     
     def build_ui(self):
         """Build the merger & splitter UI."""
         # Tabs for merge and split operations
         self.operation_tabs = ft.Tabs(
+            length=4,
             selected_index=0,
             animation_duration=300,
-            tabs=[
-                ft.Tab(
-                    text="Merge PDFs",
-                    content=self._build_merge_ui(),
-                ),
-                ft.Tab(
-                    text="Split PDF",
-                    content=self._build_split_ui(),
-                ),
-                ft.Tab(
-                    text="Extract Pages",
-                    content=self._build_extract_ui(),
-                ),
-                ft.Tab(
-                    text="Compress PDF",
-                    content=self._build_compress_ui(),
-                ),
-            ],
+            expand=True,
+            content=ft.Column(
+                expand=True,
+                controls=[
+                    ft.TabBar(tabs=[
+                        ft.Tab(label="Merge PDFs"),
+                        ft.Tab(label="Split PDF"),
+                        ft.Tab(label="Extract Pages"),
+                        ft.Tab(label="Compress PDF"),
+                    ]),
+                    ft.TabBarView(
+                        expand=True,
+                        controls=[
+                            self._build_merge_ui(),
+                            self._build_split_ui(),
+                            self._build_extract_ui(),
+                            self._build_compress_ui(),
+                        ],
+                    ),
+                ],
+            ),
         )
         
         # Main container
@@ -58,27 +66,30 @@ class PDFMerger:
             content=ft.Column([
                 ft.Text(
                     "Merge, Split & Compress PDF Files",
-                    style=ft.TextThemeStyle.TITLE_MEDIUM,
+                    theme_style=ft.TextThemeStyle.TITLE_MEDIUM,
                 ),
                 ft.Text(
                     "Combine multiple PDFs, split into separate files, or reduce file size",
-                    style=ft.TextThemeStyle.BODY_MEDIUM,
+                    theme_style=ft.TextThemeStyle.BODY_MEDIUM,
                 ),
                 ft.Divider(),
                 self.operation_tabs,
-            ], spacing=10),
+            ], spacing=10, expand=True),
             padding=20,
+            expand=True,
         )
     
     def _build_merge_ui(self):
         """Build the UI for merging PDFs."""
         # Button for selecting PDFs
-        self.select_pdfs_button = ft.ElevatedButton(
+        self.select_pdfs_button = ft.Button(
             "Select PDFs to Merge",
-            icon=ft.icons.FILE_COPY,
-            on_click=lambda _: self.pdf_picker.pick_files(
+            icon=ft.Icons.FILE_COPY,
+            action=ft.PickFiles(
+                self.pdf_picker,
+                file_type=ft.FilePickerFileType.CUSTOM,
                 allowed_extensions=["pdf"],
-                allow_multiple=True
+                allow_multiple=True,
             ),
         )
         
@@ -90,30 +101,30 @@ class PDFMerger:
         )
         
         # Merge button
-        self.merge_button = ft.ElevatedButton(
+        self.merge_button = ft.Button(
             "Merge PDFs",
-            icon=ft.icons.MERGE_TYPE,
+            icon=ft.Icons.MERGE_TYPE,
             on_click=self.start_merge,
             disabled=True,
         )
         
         # Reorder buttons
         self.move_up_button = ft.IconButton(
-            icon=ft.icons.ARROW_UPWARD,
+            icon=ft.Icons.ARROW_UPWARD,
             tooltip="Move file up",
             on_click=self.move_file_up,
             disabled=True,
         )
         
         self.move_down_button = ft.IconButton(
-            icon=ft.icons.ARROW_DOWNWARD,
+            icon=ft.Icons.ARROW_DOWNWARD,
             tooltip="Move file down",
             on_click=self.move_file_down,
             disabled=True,
         )
         
         self.remove_file_button = ft.IconButton(
-            icon=ft.icons.DELETE,
+            icon=ft.Icons.DELETE,
             tooltip="Remove file",
             on_click=self.remove_file,
             disabled=True,
@@ -123,7 +134,7 @@ class PDFMerger:
             self.select_pdfs_button,
             ft.Container(
                 content=self.selected_pdfs_list,
-                border=ft.border.all(1, ft.colors.GREY_400),
+                border=ft.Border.all(1, ft.Colors.GREY_400),
                 border_radius=5,
                 padding=5,
             ),
@@ -159,9 +170,9 @@ class PDFMerger:
         )
         
         # Split button
-        self.split_button = ft.ElevatedButton(
+        self.split_button = ft.Button(
             "Split PDF",
-            icon=ft.icons.CALL_SPLIT,
+            icon=ft.Icons.CALL_SPLIT,
             on_click=self.start_split,
         )
         
@@ -190,9 +201,9 @@ class PDFMerger:
         )
         
         # Extract button
-        self.extract_button = ft.ElevatedButton(
+        self.extract_button = ft.Button(
             "Extract Pages",
-            icon=ft.icons.FILE_COPY,
+            icon=ft.Icons.FILE_COPY,
             on_click=self.start_extract,
         )
         
@@ -226,9 +237,9 @@ class PDFMerger:
         )
         
         # Compress button
-        self.compress_button = ft.ElevatedButton(
+        self.compress_button = ft.Button(
             "Compress PDF",
-            icon=ft.icons.COMPRESS,
+            icon=ft.Icons.COMPRESS,
             on_click=self.start_compress,
         )
         
@@ -280,7 +291,7 @@ class PDFMerger:
                     content=ft.Row([
                         ft.Text(f"{i+1}. {file_name}", expand=True),
                     ]),
-                    bgcolor=ft.colors.BLUE_50 if i % 2 == 0 else None,
+                    bgcolor=ft.Colors.BLUE_50 if i % 2 == 0 else None,
                     padding=10,
                     border_radius=5,
                     data=i,  # Store the index for selection
@@ -300,7 +311,7 @@ class PDFMerger:
         
         # Set new selection
         e.control.selected = True
-        e.control.border = ft.border.all(2, ft.colors.BLUE_400)
+        e.control.border = ft.Border.all(2, ft.Colors.BLUE_400)
         
         # Enable reorder buttons
         self.move_up_button.disabled = e.control.data == 0
@@ -329,7 +340,7 @@ class PDFMerger:
             
             # Re-select the moved item
             self.selected_pdfs_list.controls[selected_idx-1].selected = True
-            self.selected_pdfs_list.controls[selected_idx-1].border = ft.border.all(2, ft.colors.BLUE_400)
+            self.selected_pdfs_list.controls[selected_idx-1].border = ft.Border.all(2, ft.Colors.BLUE_400)
             
             # Update button states
             self.move_up_button.disabled = selected_idx - 1 == 0
@@ -357,7 +368,7 @@ class PDFMerger:
             
             # Re-select the moved item
             self.selected_pdfs_list.controls[selected_idx+1].selected = True
-            self.selected_pdfs_list.controls[selected_idx+1].border = ft.border.all(2, ft.colors.BLUE_400)
+            self.selected_pdfs_list.controls[selected_idx+1].border = ft.Border.all(2, ft.Colors.BLUE_400)
             
             # Update button states
             self.move_up_button.disabled = selected_idx + 1 == 0
@@ -399,9 +410,7 @@ class PDFMerger:
             return
             
         # Start the merging in a separate thread
-        merge_thread = threading.Thread(target=self._merge_pdfs)
-        merge_thread.daemon = True
-        merge_thread.start()
+        run_background(self.page, self._merge_pdfs)
     
     def _merge_pdfs(self):
         """Merge multiple PDF files."""
@@ -450,9 +459,6 @@ class PDFMerger:
     
     def start_split(self, e):
         """Start the PDF splitting process."""
-        # Get current file from app
-        self.current_file = getattr(self.page.client_storage.get("current_file"), "path", None)
-        
         # Check if we have a PDF file
         if not self.current_file:
             show_snackbar(self.page, "Please select a PDF file first", "warning")
@@ -463,9 +469,7 @@ class PDFMerger:
             return
             
         # Start the splitting in a separate thread
-        split_thread = threading.Thread(target=self._split_pdf)
-        split_thread.daemon = True
-        split_thread.start()
+        run_background(self.page, self._split_pdf)
     
     def _split_pdf(self):
         """Split a PDF file into multiple parts."""
@@ -581,9 +585,6 @@ class PDFMerger:
     
     def start_extract(self, e):
         """Start the page extraction process."""
-        # Get current file from app
-        self.current_file = getattr(self.page.client_storage.get("current_file"), "path", None)
-        
         # Check if we have a PDF file
         if not self.current_file:
             show_snackbar(self.page, "Please select a PDF file first", "warning")
@@ -599,9 +600,7 @@ class PDFMerger:
             return
             
         # Start the extraction in a separate thread
-        extract_thread = threading.Thread(target=self._extract_pages)
-        extract_thread.daemon = True
-        extract_thread.start()
+        run_background(self.page, self._extract_pages)
     
     def _extract_pages(self):
         """Extract specific pages from a PDF."""
@@ -681,9 +680,6 @@ class PDFMerger:
     
     def start_compress(self, e):
         """Start the PDF compression process."""
-        # Get current file from app
-        self.current_file = getattr(self.page.client_storage.get("current_file"), "path", None)
-        
         # Check if we have a PDF file
         if not self.current_file:
             show_snackbar(self.page, "Please select a PDF file first", "warning")
@@ -694,9 +690,7 @@ class PDFMerger:
             return
             
         # Start the compression in a separate thread
-        compress_thread = threading.Thread(target=self._compress_pdf)
-        compress_thread.daemon = True
-        compress_thread.start()
+        run_background(self.page, self._compress_pdf)
     
     def _compress_pdf(self):
         """Compress a PDF file."""

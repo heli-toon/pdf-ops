@@ -1,15 +1,15 @@
 import flet as ft
 import os
-import threading
 import time
 import PyPDF2
-import fitz  # PyMuPDF
+import pymupdf as fitz
 
 from utils import (
     generate_output_filename, 
     show_snackbar, 
     update_progress, 
-    reset_progress
+    reset_progress,
+    run_background,
 )
 
 class PDFSecurity:
@@ -39,7 +39,7 @@ class PDFSecurity:
             options=[ft.dropdown.Option(op) for op in self.security_operations.keys()],
             width=400,
             autofocus=True,
-            on_change=self.on_operation_change,
+            on_select=self.on_operation_change,
         )
         
         # Password inputs
@@ -68,7 +68,7 @@ class PDFSecurity:
         # Permission settings for owner password
         self.permissions_container = ft.Container(
             content=ft.Column([
-                ft.Text("Document Permissions", style=ft.TextThemeStyle.TITLE_SMALL),
+                ft.Text("Document Permissions", theme_style=ft.TextThemeStyle.TITLE_SMALL),
                 ft.Checkbox(label="Allow printing", value=True),
                 ft.Checkbox(label="Allow copying text and images", value=True),
                 ft.Checkbox(label="Allow editing", value=False),
@@ -78,14 +78,14 @@ class PDFSecurity:
             visible=False,
             padding=10,
             border_radius=5,
-            border=ft.border.all(1, ft.colors.GREY_400),
-            margin=ft.margin.only(top=10, bottom=10),
+            border=ft.Border.all(1, ft.Colors.GREY_400),
+            margin=ft.Margin.only(top=10, bottom=10),
         )
         
         # Button for applying security operation
-        self.apply_button = ft.ElevatedButton(
+        self.apply_button = ft.Button(
             "Apply",
-            icon=ft.icons.SECURITY,
+            icon=ft.Icons.SECURITY,
             on_click=self.start_security_operation,
             disabled=True,
         )
@@ -102,11 +102,11 @@ class PDFSecurity:
             content=ft.Column([
                 ft.Text(
                     "PDF Security",
-                    style=ft.TextThemeStyle.TITLE_MEDIUM,
+                    theme_style=ft.TextThemeStyle.TITLE_MEDIUM,
                 ),
                 ft.Text(
                     "Encrypt, decrypt, and manage PDF security",
-                    style=ft.TextThemeStyle.BODY_MEDIUM,
+                    theme_style=ft.TextThemeStyle.BODY_MEDIUM,
                 ),
                 ft.Divider(),
                 self.security_dropdown,
@@ -165,8 +165,6 @@ class PDFSecurity:
             return
             
         # Get current file from app
-        self.current_file = getattr(self.page.client_storage.get("current_file"), "path", None)
-        
         # Check if we have a PDF file
         if not self.current_file:
             show_snackbar(self.page, "Please select a PDF file first", "warning")
@@ -193,11 +191,11 @@ class PDFSecurity:
                 return
         
         # Start the operation in a separate thread
-        security_thread = threading.Thread(
-            target=self.security_operations[operation]
-        )
-        security_thread.daemon = True
-        security_thread.start()
+        run_background(self.page, self.security_operations[operation])
+
+    def set_current_file(self, file_path):
+        """Receive the active file selection from the application shell."""
+        self.current_file = file_path
     
     def encrypt_pdf(self):
         """Encrypt a PDF file with a password."""

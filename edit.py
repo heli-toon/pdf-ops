@@ -1,18 +1,18 @@
 import flet as ft
 import os
-import threading
 import time
 import tempfile
 from PIL import Image, ImageDraw, ImageFont
 import PyPDF2
-import fitz  # PyMuPDF
+import pymupdf as fitz
 
 from utils import (
     generate_output_filename, 
     show_snackbar, 
     update_progress, 
     reset_progress,
-    simulate_progress
+    simulate_progress,
+    run_background,
 )
 
 class PDFEditor:
@@ -36,7 +36,7 @@ class PDFEditor:
         
         # File picker for image selection
         self.image_picker = ft.FilePicker(on_result=self.on_image_selected)
-        self.page.overlay.append(self.image_picker)
+        self.page.services.append(self.image_picker)
         
         # Selected image path
         self.selected_image = None
@@ -106,12 +106,13 @@ class PDFEditor:
         
         # Image editing controls
         self.image_controls = ft.Column([
-            ft.ElevatedButton(
+            ft.Button(
                 "Select Image",
-                icon=ft.icons.IMAGE,
-                on_click=lambda _: self.image_picker.pick_files(
+                icon=ft.Icons.IMAGE,
+                action=ft.PickFiles(
+                    self.image_picker,
+                    file_type=ft.FilePickerFileType.CUSTOM,
                     allowed_extensions=["jpg", "jpeg", "png"],
-                    allow_multiple=False
                 ),
             ),
             ft.Text("No image selected", size=12),
@@ -275,9 +276,9 @@ class PDFEditor:
         ], visible=False, spacing=10)
         
         # Button for applying edits
-        self.apply_button = ft.ElevatedButton(
+        self.apply_button = ft.Button(
             "Apply",
-            icon=ft.icons.CHECK,
+            icon=ft.Icons.CHECK,
             on_click=self.start_editing,
             disabled=True,
         )
@@ -326,11 +327,11 @@ class PDFEditor:
             content=ft.Column([
                 ft.Text(
                     "Edit PDF Files",
-                    style=ft.TextThemeStyle.TITLE_MEDIUM,
+                    theme_style=ft.TextThemeStyle.TITLE_MEDIUM,
                 ),
                 ft.Text(
                     "Add text, images, watermarks, or modify pages",
-                    style=ft.TextThemeStyle.BODY_MEDIUM,
+                    theme_style=ft.TextThemeStyle.BODY_MEDIUM,
                 ),
                 ft.Divider(),
                 self.edit_dropdown,
@@ -360,8 +361,6 @@ class PDFEditor:
             return
             
         # Get current file from app
-        self.current_file = getattr(self.page.client_storage.get("current_file"), "path", None)
-        
         # Check if we have a PDF file
         if not self.current_file:
             show_snackbar(self.page, "Please select a PDF file first", "warning")
@@ -371,12 +370,11 @@ class PDFEditor:
             show_snackbar(self.page, "Please select a PDF file", "warning")
             return
             
-        # Start the editing in a separate thread
-        editing_thread = threading.Thread(
-            target=self.edit_operations[self.edit_dropdown.value]
-        )
-        editing_thread.daemon = True
-        editing_thread.start()
+        run_background(self.page, self.edit_operations[self.edit_dropdown.value])
+
+    def set_current_file(self, file_path):
+        """Receive the active file selection from the application shell."""
+        self.current_file = file_path
     
     def add_text(self):
         """Add text to a PDF file."""

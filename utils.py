@@ -2,11 +2,21 @@ import flet as ft
 import os
 import platform
 from pathlib import Path
-import fitz  # PyMuPDF
+import pymupdf as fitz
 import shutil
-import tempfile
 from datetime import datetime
 import time
+
+
+def run_background(page, operation):
+    """Run a blocking operation through Flet's page-managed worker executor."""
+    def guarded_operation():
+        try:
+            operation()
+        except Exception as error:
+            show_snackbar(page, f"Unexpected background error: {error}", "error")
+
+    page.run_thread(guarded_operation)
 
 def get_output_dir():
     """Get the output directory for saving processed files."""
@@ -35,15 +45,15 @@ def generate_output_filename(input_filename, operation, extension=None):
 def show_snackbar(page, message, color="success"):
     """Show a snackbar notification."""
     color_map = {
-        "success": ft.colors.GREEN_500,
-        "error": ft.colors.RED_500,
-        "info": ft.colors.BLUE_500,
-        "warning": ft.colors.ORANGE_500,
+        "success": ft.Colors.GREEN_500,
+        "error": ft.Colors.RED_500,
+        "info": ft.Colors.BLUE_500,
+        "warning": ft.Colors.ORANGE_500,
     }
     
     page.snack_bar = ft.SnackBar(
         content=ft.Text(message),
-        bgcolor=color_map.get(color, ft.colors.BLUE_500),
+        bgcolor=color_map.get(color, ft.Colors.BLUE_500),
         action="Dismiss",
     )
     page.snack_bar.open = True
@@ -54,7 +64,7 @@ def create_pdf_preview(file_path, page, max_pages=5):
     if not file_path or not file_path.lower().endswith('.pdf'):
         return ft.Container(
             ft.Text("No PDF preview available"),
-            alignment=ft.alignment.center,
+            alignment=ft.Alignment.CENTER,
             padding=20
         )
     
@@ -73,13 +83,13 @@ def create_pdf_preview(file_path, page, max_pages=5):
             ft.Container(
                 ft.Column([
                     ft.Text(f"Document: {os.path.basename(file_path)}", 
-                          style=ft.TextThemeStyle.TITLE_MEDIUM),
+                          theme_style=ft.TextThemeStyle.TITLE_MEDIUM),
                     ft.Text(f"Pages: {pdf_document.page_count}", 
-                          style=ft.TextThemeStyle.BODY_MEDIUM),
+                          theme_style=ft.TextThemeStyle.BODY_MEDIUM),
                 ]),
                 padding=10,
                 border_radius=8,
-                bgcolor=ft.colors.BLUE_50 if page.theme_mode == ft.ThemeMode.LIGHT else ft.colors.BLUE_900,
+                bgcolor=ft.Colors.BLUE_50 if page.theme_mode == ft.ThemeMode.LIGHT else ft.Colors.BLUE_900,
             )
         )
         
@@ -87,7 +97,7 @@ def create_pdf_preview(file_path, page, max_pages=5):
         if pages_to_show < pdf_document.page_count:
             pages_column.controls.append(
                 ft.Text(f"Showing first {pages_to_show} of {pdf_document.page_count} pages",
-                      style=ft.TextThemeStyle.BODY_SMALL, 
+                      theme_style=ft.TextThemeStyle.BODY_SMALL, 
                       italic=True)
             )
         
@@ -99,29 +109,22 @@ def create_pdf_preview(file_path, page, max_pages=5):
             # Render page to an image
             pix = page_obj.get_pixmap(matrix=fitz.Matrix(0.5, 0.5))
             
-            # Save the image to a temporary file
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as temp_file:
-                pix.save(temp_file.name)
-                
-                # Create an image control
-                img = ft.Image(
-                    src=temp_file.name,
-                    width=400,
-                    fit=ft.ImageFit.CONTAIN,
+            img = ft.Image(
+                src=pix.tobytes("png"),
+                width=400,
+                fit=ft.ImageFit.CONTAIN,
+            )
+            pages_column.controls.append(
+                ft.Container(
+                    content=ft.Column([
+                        ft.Text(f"Page {page_num + 1}", theme_style=ft.TextThemeStyle.BODY_SMALL),
+                        img,
+                    ]),
+                    padding=10,
+                    border_radius=8,
+                    border=ft.Border.all(1, ft.Colors.GREY_400),
                 )
-                
-                # Add the image to the column inside a container
-                pages_column.controls.append(
-                    ft.Container(
-                        content=ft.Column([
-                            ft.Text(f"Page {page_num + 1}", style=ft.TextThemeStyle.BODY_SMALL),
-                            img
-                        ]),
-                        padding=10,
-                        border_radius=8,
-                        border=ft.border.all(1, ft.colors.GREY_400),
-                    )
-                )
+            )
         
         # Close the PDF document
         pdf_document.close()
@@ -131,9 +134,9 @@ def create_pdf_preview(file_path, page, max_pages=5):
     except Exception as e:
         return ft.Container(
             ft.Text(f"Error generating preview: {str(e)}"),
-            alignment=ft.alignment.center,
+            alignment=ft.Alignment.CENTER,
             padding=20,
-            bgcolor=ft.colors.RED_100 if page.theme_mode == ft.ThemeMode.LIGHT else ft.colors.RED_900,
+            bgcolor=ft.Colors.RED_100 if page.theme_mode == ft.ThemeMode.LIGHT else ft.Colors.RED_900,
             border_radius=8,
         )
 
