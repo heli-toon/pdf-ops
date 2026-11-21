@@ -5,6 +5,12 @@ import tempfile
 from PIL import Image, ImageDraw, ImageFont
 import PyPDF2
 import pymupdf as fitz
+from pdf_engine import (
+    add_watermark_to_pdf,
+    crop_pdf_pages,
+    parse_page_ranges,
+    rotate_pdf_pages,
+)
 
 from utils import (
     generate_output_filename, 
@@ -576,48 +582,18 @@ class PDFEditor:
                 generate_output_filename(self.current_file, "watermarked", ".pdf")
             )
             
-            # Open the PDF
-            update_progress(self.progress_bar, self.progress_text, 0.3, "Opening PDF...")
-            doc = fitz.open(self.current_file)
-            
-            update_progress(self.progress_bar, self.progress_text, 0.5, "Adding watermark to PDF...")
-            
-            # Add watermark to each page
-            for i, page in enumerate(doc):
-                # Get page dimensions
-                rect = page.rect
-                center_x = rect.width / 2
-                center_y = rect.height / 2
-                
-                # Create watermark
-                page.insert_text(
-                    fitz.Point(center_x, center_y),
-                    watermark_text,
-                    fontsize=font_size,
-                    color=rgb,
-                    alpha=opacity,
-                    rotate=angle,
-                    overlay=True
-                )
-                
-                # Update progress
-                progress = 0.5 + 0.4 * ((i + 1) / len(doc))
-                update_progress(
-                    self.progress_bar, 
-                    self.progress_text, 
-                    progress, 
-                    f"Adding watermark to page {i+1} of {len(doc)}..."
-                )
-                
-            # Save the modified PDF
-            update_progress(self.progress_bar, self.progress_text, 0.9, "Saving watermarked PDF...")
-            doc.save(output_file)
-            doc.close()
+            update_progress(self.progress_bar, self.progress_text, 0.4, "Applying watermark to PDF...")
+            add_watermark_to_pdf(
+                self.current_file,
+                output_file,
+                watermark_text,
+                font_size=font_size,
+                color=rgb,
+                opacity=opacity,
+                angle=angle,
+            )
             
             update_progress(self.progress_bar, self.progress_text, 1.0, "Watermark addition complete!")
-            time.sleep(1)  # Allow user to see completion
-            
-            # Reset progress and show success message
             reset_progress(self.progress_bar, self.progress_text)
             show_snackbar(self.page, f"Watermark successfully added to PDF: {output_file}", "success")
             
@@ -651,59 +627,25 @@ class PDFEditor:
                 generate_output_filename(self.current_file, "rotated", ".pdf")
             )
             
-            # Open the PDF
-            update_progress(self.progress_bar, self.progress_text, 0.3, "Opening PDF...")
-            doc = fitz.open(self.current_file)
-            
             # Determine which pages to rotate
-            pages_to_rotate = []
-            if pages_option == "All Pages":
-                pages_to_rotate = list(range(len(doc)))
-            elif pages_option == "First Page":
-                pages_to_rotate = [0]
-            elif pages_option == "Last Page":
-                pages_to_rotate = [len(doc) - 1]
-            elif pages_option == "Custom Range" and page_range_str:
-                # Parse page range string (e.g., "1-3, 5, 7-9")
-                try:
-                    for part in page_range_str.split(','):
-                        part = part.strip()
-                        if '-' in part:
-                            start, end = part.split('-')
-                            pages_to_rotate.extend(range(int(start) - 1, int(end)))
-                        else:
-                            pages_to_rotate.append(int(part) - 1)
-                except:
-                    show_snackbar(self.page, "Invalid page range format", "error")
-                    reset_progress(self.progress_bar, self.progress_text)
-                    return
-            
-            update_progress(self.progress_bar, self.progress_text, 0.5, f"Rotating {len(pages_to_rotate)} pages...")
-            
-            # Rotate the specified pages
-            for i, page_num in enumerate(pages_to_rotate):
-                if 0 <= page_num < len(doc):
-                    page = doc[page_num]
-                    page.set_rotation(rotation)
-                    
-                    # Update progress
-                    progress = 0.5 + 0.4 * ((i + 1) / len(pages_to_rotate))
-                    update_progress(
-                        self.progress_bar, 
-                        self.progress_text, 
-                        progress, 
-                        f"Rotating page {page_num + 1}..."
-                    )
+            with fitz.open(self.current_file) as doc:
+                total_pages = doc.page_count
                 
-            # Save the modified PDF
-            update_progress(self.progress_bar, self.progress_text, 0.9, "Saving rotated PDF...")
-            doc.save(output_file)
-            doc.close()
+            if pages_option == "All Pages":
+                page_numbers = None
+            elif pages_option == "First Page":
+                page_numbers = [1]
+            elif pages_option == "Last Page":
+                page_numbers = [total_pages]
+            elif pages_option == "Custom Range" and page_range_str:
+                page_numbers = parse_page_ranges(page_range_str, total_pages)
+            else:
+                page_numbers = None
+            
+            update_progress(self.progress_bar, self.progress_text, 0.5, "Rotating pages...")
+            rotate_pdf_pages(self.current_file, output_file, rotation, page_numbers)
             
             update_progress(self.progress_bar, self.progress_text, 1.0, "Page rotation complete!")
-            time.sleep(1)  # Allow user to see completion
-            
-            # Reset progress and show success message
             reset_progress(self.progress_bar, self.progress_text)
             show_snackbar(self.page, f"Pages successfully rotated: {output_file}", "success")
             
@@ -731,72 +673,36 @@ class PDFEditor:
                 generate_output_filename(self.current_file, "cropped", ".pdf")
             )
             
-            # Open the PDF
-            update_progress(self.progress_bar, self.progress_text, 0.3, "Opening PDF...")
-            doc = fitz.open(self.current_file)
-            
             # Determine which pages to crop
-            pages_to_crop = []
-            if pages_option == "All Pages":
-                pages_to_crop = list(range(len(doc)))
-            elif pages_option == "First Page":
-                pages_to_crop = [0]
-            elif pages_option == "Last Page":
-                pages_to_crop = [len(doc) - 1]
-            elif pages_option == "Custom Range" and page_range_str:
-                # Parse page range string (e.g., "1-3, 5, 7-9")
-                try:
-                    for part in page_range_str.split(','):
-                        part = part.strip()
-                        if '-' in part:
-                            start, end = part.split('-')
-                            pages_to_crop.extend(range(int(start) - 1, int(end)))
-                        else:
-                            pages_to_crop.append(int(part) - 1)
-                except:
-                    show_snackbar(self.page, "Invalid page range format", "error")
-                    reset_progress(self.progress_bar, self.progress_text)
-                    return
-            
-            update_progress(self.progress_bar, self.progress_text, 0.5, f"Cropping {len(pages_to_crop)} pages...")
-            
-            # Crop the specified pages
-            for i, page_num in enumerate(pages_to_crop):
-                if 0 <= page_num < len(doc):
-                    page = doc[page_num]
-                    rect = page.rect
-                    
-                    # Calculate crop box
-                    crop_rect = fitz.Rect(
-                        rect.x0 + rect.width * left,
-                        rect.y0 + rect.height * top,
-                        rect.x1 - rect.width * right,
-                        rect.y1 - rect.height * bottom
-                    )
-                    
-                    # Set the cropbox
-                    page.set_cropbox(crop_rect)
-                    
-                    # Update progress
-                    progress = 0.5 + 0.4 * ((i + 1) / len(pages_to_crop))
-                    update_progress(
-                        self.progress_bar, 
-                        self.progress_text, 
-                        progress, 
-                        f"Cropping page {page_num + 1}..."
-                    )
+            with fitz.open(self.current_file) as doc:
+                total_pages = doc.page_count
                 
-            # Save the modified PDF
-            update_progress(self.progress_bar, self.progress_text, 0.9, "Saving cropped PDF...")
-            doc.save(output_file)
-            doc.close()
+            if pages_option == "All Pages":
+                page_numbers = None
+            elif pages_option == "First Page":
+                page_numbers = [1]
+            elif pages_option == "Last Page":
+                page_numbers = [total_pages]
+            elif pages_option == "Custom Range" and page_range_str:
+                page_numbers = parse_page_ranges(page_range_str, total_pages)
+            else:
+                page_numbers = None
+            
+            update_progress(self.progress_bar, self.progress_text, 0.5, "Cropping pages...")
+            crop_pdf_pages(
+                self.current_file,
+                output_file,
+                margins=(left, top, right, bottom),
+                page_numbers=page_numbers,
+            )
             
             update_progress(self.progress_bar, self.progress_text, 1.0, "Page cropping complete!")
-            time.sleep(1)  # Allow user to see completion
-            
-            # Reset progress and show success message
             reset_progress(self.progress_bar, self.progress_text)
             show_snackbar(self.page, f"Pages successfully cropped: {output_file}", "success")
+            
+        except Exception as e:
+            reset_progress(self.progress_bar, self.progress_text)
+            show_snackbar(self.page, f"Error cropping pages: {str(e)}", "error")
             
         except Exception as e:
             reset_progress(self.progress_bar, self.progress_text)

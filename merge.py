@@ -3,6 +3,7 @@ import os
 import time
 import PyPDF2
 import pymupdf as fitz
+from pdf_engine import compress_pdf, inspect_pdf, parse_page_ranges
 
 from utils import (
     generate_output_filename, 
@@ -156,6 +157,7 @@ class PDFMerger:
                 ft.dropdown.Option("Split by page count"),
                 ft.dropdown.Option("Split into individual pages"),
                 ft.dropdown.Option("Split by bookmarks"),
+                ft.dropdown.Option("Split by custom range"),
             ],
             width=400,
             value="Split by page count",
@@ -168,6 +170,12 @@ class PDFMerger:
             width=150,
             keyboard_type=ft.KeyboardType.NUMBER,
         )
+        self.split_range = ft.TextField(
+            label="Page ranges",
+            hint_text="e.g., 1-3, 5, 8-end",
+            width=400,
+            visible=False,
+        )
         
         # Split button
         self.split_button = ft.Button(
@@ -179,6 +187,7 @@ class PDFMerger:
         # Listen for split method change
         def on_split_method_change(e):
             self.pages_per_file.visible = (self.split_dropdown.value == "Split by page count")
+            self.split_range.visible = (self.split_dropdown.value == "Split by custom range")
             self.page.update()
             
         self.split_dropdown.on_change = on_split_method_change
@@ -187,6 +196,7 @@ class PDFMerger:
             ft.Text("Split a single PDF into multiple files"),
             self.split_dropdown,
             self.pages_per_file,
+            self.split_range,
             ft.Container(height=10),  # Spacer
             self.split_button,
         ], spacing=15)
@@ -280,16 +290,25 @@ class PDFMerger:
             self.page.update()
     
     def _update_pdf_list(self):
-        """Update the list of selected PDFs."""
+        """Update the list of selected PDFs with inspected page counts and file sizes."""
         self.selected_pdfs_list.controls.clear()
         
         for i, pdf_path in enumerate(self.pdf_files):
             file_name = os.path.basename(pdf_path)
+            detail = ""
+            try:
+                info = inspect_pdf(pdf_path)
+                page_count = info["page_count"]
+                size_kb = info["file_size"] / 1024
+                pages_label = f"{page_count} page{'s' if page_count != 1 else ''}"
+                detail = f" ({pages_label}, {size_kb:.1f} KB)"
+            except Exception:
+                pass
             
             self.selected_pdfs_list.controls.append(
                 ft.Container(
                     content=ft.Row([
-                        ft.Text(f"{i+1}. {file_name}", expand=True),
+                        ft.Text(f"{i+1}. {file_name}{detail}", expand=True),
                     ]),
                     bgcolor=ft.Colors.BLUE_50 if i % 2 == 0 else None,
                     padding=10,
@@ -298,7 +317,7 @@ class PDFMerger:
                     on_click=self._select_file_item,
                 )
             )
-            
+        
         self.page.update()
     
     def _select_file_item(self, e):
@@ -564,14 +583,36 @@ class PDFMerger:
                     )
                     
                 elif split_method == "Split by bookmarks":
-                    # This feature would require more complex bookmark handling
+                    starts = self._bookmark_starts(pdf_reader)
+                    if not starts:
+                        raise ValueError("No top-level bookmarks were found")
+                    if 0 not in starts:
+                        starts.insert(0, 0)
+                    for index, start in enumerate(starts):
+                        end = starts[index + 1] if index + 1 < len(starts) else total_pages
+                        writer = PyPDF2.PdfWriter()
+                        for page_number in range(start, end):
+                            writer.add_page(pdf_reader.pages[page_number])
+                        with open(os.path.join(output_dir, f"{base_name}_chapter_{index + 1}.pdf"), "wb") as out_f:
+                            writer.write(out_f)
                     show_snackbar(
-                        self.page, 
-                        "Splitting by bookmarks requires additional PDF analysis tools", 
-                        "info"
+                        self.page,
+                        f"Split PDF into {len(starts)} chapter files by bookmarks: {output_dir}",
+                        "success",
                     )
-                    reset_progress(self.progress_bar, self.progress_text)
-                    return
+                elif split_method == "Split by custom range":
+                    page_numbers = parse_page_ranges(self.split_range.value, total_pages)
+                    writer = PyPDF2.PdfWriter()
+                    for page_number in page_numbers:
+                        writer.add_page(pdf_reader.pages[page_number - 1])
+                    selected_output = os.path.join(output_dir, f"{base_name}_selected_pages.pdf")
+                    with open(selected_output, "wb") as out_f:
+                        writer.write(out_f)
+                    show_snackbar(
+                        self.page,
+                        f"Extracted {len(page_numbers)} pages: {selected_output}",
+                        "success",
+                    )
                 
             update_progress(self.progress_bar, self.progress_text, 1.0, "Split complete!")
             time.sleep(1)  # Allow user to see completion
@@ -607,28 +648,12 @@ class PDFMerger:
         try:
             update_progress(self.progress_bar, self.progress_text, 0.1, "Starting page extraction...")
             
-            # Parse page range
-            page_numbers = []
-            try:
-                for part in self.page_range.value.split(','):
-                    part = part.strip()
-                    if '-' in part:
-                        start, end = map(int, part.split('-'))
-                        page_numbers.extend(range(start, end + 1))
-                    else:
-                        page_numbers.append(int(part))
-            except ValueError:
-                show_snackbar(self.page, "Invalid page range format", "error")
-                reset_progress(self.progress_bar, self.progress_text)
-                return
-                
             # Open the PDF file
             with open(self.current_file, 'rb') as f:
                 pdf_reader = PyPDF2.PdfReader(f)
                 total_pages = len(pdf_reader.pages)
                 
-                # Validate page numbers
-                page_numbers = [p for p in page_numbers if 1 <= p <= total_pages]
+                page_numbers = parse_page_ranges(self.page_range.value, total_pages)
                 
                 if not page_numbers:
                     show_snackbar(self.page, "No valid pages in the specified range", "warning")
@@ -697,9 +722,6 @@ class PDFMerger:
         try:
             update_progress(self.progress_bar, self.progress_text, 0.1, "Starting PDF compression...")
             
-            # Get compression settings
-            compression_level = int(self.compression_level.value)
-            image_quality = int(self.image_quality.value)
             
             # Generate output filename
             output_file = os.path.join(
@@ -710,36 +732,10 @@ class PDFMerger:
             # Get original file size
             original_size = os.path.getsize(self.current_file)
             
-            # Open the PDF with PyMuPDF
             update_progress(self.progress_bar, self.progress_text, 0.3, "Analyzing PDF...")
-            doc = fitz.open(self.current_file)
-            
-            # We'll simulate compression since actual compression would require 
-            # more complex image resampling and content optimization
             update_progress(self.progress_bar, self.progress_text, 0.5, "Compressing PDF content...")
-            
-            # Wait a bit to simulate processing
-            time.sleep(1)
-            
-            update_progress(self.progress_bar, self.progress_text, 0.7, "Optimizing images...")
-            
-            # Wait a bit more
-            time.sleep(1)
-            
-            # Save with compression
             update_progress(self.progress_bar, self.progress_text, 0.9, "Saving compressed PDF...")
-            
-            # Here we use PyMuPDF's compression parameters
-            # Higher compression_level = more compression
-            # Lower image_quality = more compression
-            doc.save(
-                output_file,
-                garbage=4,  # Maximum garbage collection
-                deflate=True,  # Use deflate compression
-                clean=True,  # Clean content streams
-            )
-            
-            doc.close()
+            compress_pdf(self.current_file, output_file)
             
             # Get new file size
             new_size = os.path.getsize(output_file)
@@ -770,3 +766,18 @@ class PDFMerger:
         except Exception as e:
             reset_progress(self.progress_bar, self.progress_text)
             show_snackbar(self.page, f"Error compressing PDF: {str(e)}", "error")
+
+    @staticmethod
+    def _bookmark_starts(reader):
+        """Return zero-based locations for top-level bookmark destinations."""
+        starts = []
+        for entry in getattr(reader, "outline", []):
+            if isinstance(entry, list):
+                continue
+            try:
+                page_number = reader.get_destination_page_number(entry)
+            except Exception:
+                continue
+            if page_number not in starts:
+                starts.append(page_number)
+        return sorted(starts)

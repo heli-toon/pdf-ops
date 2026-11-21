@@ -3,6 +3,7 @@ import os
 import time
 import PyPDF2
 import pymupdf as fitz
+from pdf_engine import decrypt_pdf as engine_decrypt_pdf, encrypt_pdf as engine_encrypt_pdf
 
 from utils import (
     generate_output_filename, 
@@ -198,14 +199,11 @@ class PDFSecurity:
         self.current_file = file_path
     
     def encrypt_pdf(self):
-        """Encrypt a PDF file with a password."""
+        """Encrypt a PDF file with modern AES-256 and granular permissions."""
         try:
             update_progress(self.progress_bar, self.progress_text, 0.1, "Starting PDF encryption...")
             
-            # Get the password
             password = self.password_input.value
-            
-            # Get permissions
             permissions = self.permissions_container.content.controls
             allow_printing = permissions[1].value
             allow_copying = permissions[2].value
@@ -213,59 +211,26 @@ class PDFSecurity:
             allow_comments = permissions[4].value
             allow_forms = permissions[5].value
             
-            # Generate output filename
             output_file = os.path.join(
                 self.output_dir, 
                 generate_output_filename(self.current_file, "encrypted", ".pdf")
             )
             
-            # Open the PDF
-            update_progress(self.progress_bar, self.progress_text, 0.3, "Reading PDF...")
-            with open(self.current_file, 'rb') as f:
-                pdf_reader = PyPDF2.PdfReader(f)
-                
-                # Check if already encrypted
-                if pdf_reader.is_encrypted:
-                    show_snackbar(self.page, "PDF is already encrypted", "warning")
-                    reset_progress(self.progress_bar, self.progress_text)
-                    return
-                    
-                # Create a PDF writer
-                pdf_writer = PyPDF2.PdfWriter()
-                
-                # Add all pages to the writer
-                update_progress(self.progress_bar, self.progress_text, 0.5, "Preparing document...")
-                for page in pdf_reader.pages:
-                    pdf_writer.add_page(page)
-                
-                # Set up encryption flags
-                update_progress(self.progress_bar, self.progress_text, 0.7, "Setting security...")
-                encryption_flags = 0
-                if allow_printing:
-                    encryption_flags |= PyPDF2.PageObject.PRINT
-                if allow_copying:
-                    encryption_flags |= PyPDF2.PageObject.EXTRACT
-                if allow_editing:
-                    encryption_flags |= PyPDF2.PageObject.MODIFY
-                if allow_comments:
-                    encryption_flags |= PyPDF2.PageObject.ANNOTATE
-                if allow_forms:
-                    encryption_flags |= PyPDF2.PageObject.FILL_FORM
-                
-                # Encrypt the PDF
-                pdf_writer.encrypt(password, password, use_128bit=True, permissions_flag=encryption_flags)
-                
-                # Write the encrypted PDF
-                update_progress(self.progress_bar, self.progress_text, 0.9, "Writing encrypted PDF...")
-                with open(output_file, 'wb') as out_f:
-                    pdf_writer.write(out_f)
-                
-            update_progress(self.progress_bar, self.progress_text, 1.0, "Encryption complete!")
-            time.sleep(1)  # Allow user to see completion
+            update_progress(self.progress_bar, self.progress_text, 0.5, "Securing document with AES-256...")
+            engine_encrypt_pdf(
+                self.current_file,
+                output_file,
+                user_password=password,
+                allow_printing=allow_printing,
+                allow_copying=allow_copying,
+                allow_editing=allow_editing,
+                allow_annotations=allow_comments,
+                allow_forms=allow_forms,
+            )
             
-            # Reset progress and show success message
+            update_progress(self.progress_bar, self.progress_text, 1.0, "Encryption complete!")
             reset_progress(self.progress_bar, self.progress_text)
-            show_snackbar(self.page, f"PDF successfully encrypted: {output_file}", "success")
+            show_snackbar(self.page, f"PDF successfully encrypted (AES-256): {output_file}", "success")
             
         except Exception as e:
             reset_progress(self.progress_bar, self.progress_text)
@@ -276,51 +241,16 @@ class PDFSecurity:
         try:
             update_progress(self.progress_bar, self.progress_text, 0.1, "Starting PDF decryption...")
             
-            # Get the password
             password = self.password_input.value
-            
-            # Generate output filename
             output_file = os.path.join(
                 self.output_dir, 
                 generate_output_filename(self.current_file, "decrypted", ".pdf")
             )
             
-            # Open the PDF
-            update_progress(self.progress_bar, self.progress_text, 0.3, "Reading PDF...")
-            with open(self.current_file, 'rb') as f:
-                pdf_reader = PyPDF2.PdfReader(f)
-                
-                # Check if encrypted
-                if not pdf_reader.is_encrypted:
-                    show_snackbar(self.page, "PDF is not encrypted", "warning")
-                    reset_progress(self.progress_bar, self.progress_text)
-                    return
-                    
-                # Try to decrypt with the provided password
-                try:
-                    pdf_reader.decrypt(password)
-                except:
-                    show_snackbar(self.page, "Incorrect password", "error")
-                    reset_progress(self.progress_bar, self.progress_text)
-                    return
-                
-                # Create a PDF writer
-                pdf_writer = PyPDF2.PdfWriter()
-                
-                # Add all pages to the writer
-                update_progress(self.progress_bar, self.progress_text, 0.6, "Copying decrypted content...")
-                for page in pdf_reader.pages:
-                    pdf_writer.add_page(page)
-                
-                # Write the decrypted PDF
-                update_progress(self.progress_bar, self.progress_text, 0.9, "Writing decrypted PDF...")
-                with open(output_file, 'wb') as out_f:
-                    pdf_writer.write(out_f)
-                
-            update_progress(self.progress_bar, self.progress_text, 1.0, "Decryption complete!")
-            time.sleep(1)  # Allow user to see completion
+            update_progress(self.progress_bar, self.progress_text, 0.5, "Authenticating and decrypting...")
+            engine_decrypt_pdf(self.current_file, output_file, password)
             
-            # Reset progress and show success message
+            update_progress(self.progress_bar, self.progress_text, 1.0, "Decryption complete!")
             reset_progress(self.progress_bar, self.progress_text)
             show_snackbar(self.page, f"PDF successfully decrypted: {output_file}", "success")
             
@@ -329,14 +259,11 @@ class PDFSecurity:
             show_snackbar(self.page, f"Error decrypting PDF: {str(e)}", "error")
     
     def add_permission_password(self):
-        """Add an owner password to a PDF file."""
+        """Add an owner permission password to a PDF file."""
         try:
             update_progress(self.progress_bar, self.progress_text, 0.1, "Starting permission password addition...")
             
-            # Get the password
             password = self.password_input.value
-            
-            # Get permissions
             permissions = self.permissions_container.content.controls
             allow_printing = permissions[1].value
             allow_copying = permissions[2].value
@@ -344,57 +271,25 @@ class PDFSecurity:
             allow_comments = permissions[4].value
             allow_forms = permissions[5].value
             
-            # Generate output filename
             output_file = os.path.join(
                 self.output_dir, 
                 generate_output_filename(self.current_file, "permission_added", ".pdf")
             )
             
-            # Open the PDF
-            update_progress(self.progress_bar, self.progress_text, 0.3, "Reading PDF...")
-            with open(self.current_file, 'rb') as f:
-                pdf_reader = PyPDF2.PdfReader(f)
-                
-                # Check if already encrypted
-                if pdf_reader.is_encrypted:
-                    show_snackbar(self.page, "PDF is already encrypted", "warning")
-                    reset_progress(self.progress_bar, self.progress_text)
-                    return
-                    
-                # Create a PDF writer
-                pdf_writer = PyPDF2.PdfWriter()
-                
-                # Add all pages to the writer
-                update_progress(self.progress_bar, self.progress_text, 0.5, "Preparing document...")
-                for page in pdf_reader.pages:
-                    pdf_writer.add_page(page)
-                
-                # Set up encryption flags
-                update_progress(self.progress_bar, self.progress_text, 0.7, "Setting permissions...")
-                encryption_flags = 0
-                if allow_printing:
-                    encryption_flags |= PyPDF2.PageObject.PRINT
-                if allow_copying:
-                    encryption_flags |= PyPDF2.PageObject.EXTRACT
-                if allow_editing:
-                    encryption_flags |= PyPDF2.PageObject.MODIFY
-                if allow_comments:
-                    encryption_flags |= PyPDF2.PageObject.ANNOTATE
-                if allow_forms:
-                    encryption_flags |= PyPDF2.PageObject.FILL_FORM
-                
-                # Encrypt with user and owner password
-                pdf_writer.encrypt("", password, use_128bit=True, permissions_flag=encryption_flags)
-                
-                # Write the secured PDF
-                update_progress(self.progress_bar, self.progress_text, 0.9, "Writing secured PDF...")
-                with open(output_file, 'wb') as out_f:
-                    pdf_writer.write(out_f)
-                
-            update_progress(self.progress_bar, self.progress_text, 1.0, "Permission password addition complete!")
-            time.sleep(1)  # Allow user to see completion
+            update_progress(self.progress_bar, self.progress_text, 0.5, "Setting document permissions...")
+            engine_encrypt_pdf(
+                self.current_file,
+                output_file,
+                user_password="",
+                owner_password=password,
+                allow_printing=allow_printing,
+                allow_copying=allow_copying,
+                allow_editing=allow_editing,
+                allow_annotations=allow_comments,
+                allow_forms=allow_forms,
+            )
             
-            # Reset progress and show success message
+            update_progress(self.progress_bar, self.progress_text, 1.0, "Permission password addition complete!")
             reset_progress(self.progress_bar, self.progress_text)
             show_snackbar(self.page, f"Permission password successfully added: {output_file}", "success")
             
@@ -407,51 +302,16 @@ class PDFSecurity:
         try:
             update_progress(self.progress_bar, self.progress_text, 0.1, "Starting password removal...")
             
-            # Get the password
             password = self.password_input.value
-            
-            # Generate output filename
             output_file = os.path.join(
                 self.output_dir, 
                 generate_output_filename(self.current_file, "password_removed", ".pdf")
             )
             
-            # Open the PDF
-            update_progress(self.progress_bar, self.progress_text, 0.3, "Reading PDF...")
-            with open(self.current_file, 'rb') as f:
-                pdf_reader = PyPDF2.PdfReader(f)
-                
-                # Check if encrypted
-                if not pdf_reader.is_encrypted:
-                    show_snackbar(self.page, "PDF is not encrypted", "warning")
-                    reset_progress(self.progress_bar, self.progress_text)
-                    return
-                    
-                # Try to decrypt with the provided password
-                try:
-                    pdf_reader.decrypt(password)
-                except:
-                    show_snackbar(self.page, "Incorrect password", "error")
-                    reset_progress(self.progress_bar, self.progress_text)
-                    return
-                
-                # Create a PDF writer
-                pdf_writer = PyPDF2.PdfWriter()
-                
-                # Add all pages to the writer
-                update_progress(self.progress_bar, self.progress_text, 0.6, "Copying decrypted content...")
-                for page in pdf_reader.pages:
-                    pdf_writer.add_page(page)
-                
-                # Write the unprotected PDF
-                update_progress(self.progress_bar, self.progress_text, 0.9, "Writing unprotected PDF...")
-                with open(output_file, 'wb') as out_f:
-                    pdf_writer.write(out_f)
-                
-            update_progress(self.progress_bar, self.progress_text, 1.0, "Password removal complete!")
-            time.sleep(1)  # Allow user to see completion
+            update_progress(self.progress_bar, self.progress_text, 0.5, "Validating password and removing security...")
+            engine_decrypt_pdf(self.current_file, output_file, password)
             
-            # Reset progress and show success message
+            update_progress(self.progress_bar, self.progress_text, 1.0, "Password removal complete!")
             reset_progress(self.progress_bar, self.progress_text)
             show_snackbar(self.page, f"Password successfully removed: {output_file}", "success")
             

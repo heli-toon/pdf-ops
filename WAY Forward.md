@@ -59,7 +59,7 @@ Before redesigning or adding new features, the existing codebase must run reliab
 - [x] Clean app boot on Linux desktop (`python main.py`) with zero crashes. Verified against Flet 1.1.2 on 2026-11-20.
 - [x] Working file handoff: Selected file is immediately recognized by Convert, Edit, Merge, and Security tabs. Verified by the AppState subscriber test on 2026-11-20.
 - [x] Clean console output without deprecation warnings or unhandled thread exceptions. Verified with `FutureWarning` promoted to an error and a clean Flet desktop-session startup on 2026-11-20.
-- [ ] Comprehensive unit tests verifying each backend function isolated from the UI.
+- [x] Comprehensive unit tests verifying each backend function isolated from the UI. Verified across 14 unit tests in `tests/test_phase1.py` and `tests/test_phase2.py` on 2026-11-20.
 
 ---
 
@@ -100,8 +100,8 @@ graph TD
 
 ### 2.2 Edit & Page Geometry Module
 - **Coordinate Precision**: Replace arbitrary pixel offsets with relative normalized coordinates (0.0 to 1.0) so text/watermarks scale correctly across varied page dimensions (Letter, A4, Legal).
-- **Watermark Engine**: Support opacity slider (10% to 100%), angle (-90° to 90°), font size, tiling, and layered placement (behind or over page contents).
-- **Page Transformations**: Fix rotation (90°, 180°, 270°) and cropping margins ensuring the `MediaBox` and `CropBox` are updated in sync.
+- **Watermark Engine**: Support opacity slider (10% to 100%), arbitrary angle, font size, and layered placement (behind or over page contents).
+- **Page Transformations**: Fix cumulative rotation (90°, 180°, 270°) and cropping margins ensuring the `MediaBox` and `CropBox` are updated in sync.
 
 ### 2.3 Merge, Split & Compress
 - **Merge Queue**: Support drag-to-reorder list, page count inspect, and preserve outlines (bookmarks) from merged files.
@@ -109,9 +109,20 @@ graph TD
 - **Compression**: Implement stream compression, image downsampling, and font subsetting using PyMuPDF `deflate=True` and garbage-collection modes.
 
 ### 2.4 Security & Permissions
-- **Encryption**: Modern standard AES-256 encryption using PyMuPDF / pypdf.
-- **Granular Permissions**: Restrict printing, content copying, screen readers, and form filling with owner password vs. user viewing password.
+- **Encryption**: Modern standard AES-256 encryption using PyMuPDF.
+- **Granular Permissions**: Restrict printing, content copying, editing, comments, and form filling with owner password vs. user viewing password.
 - **Decryption**: In-memory decryption and validation with feedback on invalid passphrases.
+
+### 2.5 Deliverables for Phase 2
+- [x] Standalone, UI-independent `pdf_engine.py` covering conversion, image export, compression, page ranges, geometry, and security.
+- [x] Multi-format image export (PNG, JPEG, WEBP) and DPI presets (72, 150, 300) with Pillow fallback.
+- [x] Office-to-PDF headless detection and conversion (`soffice` / `libreoffice`).
+- [x] Tabular PDF extraction directly to `.xlsx` worksheets via `pymupdf.find_tables()`.
+- [x] In-memory, temp-file-free Images-to-PDF conversion.
+- [x] Custom range parsing supporting `1-3, 5, 8-end` syntax.
+- [x] Bookmark chapter splitting and inspected file metadata (page count + size) in the merge queue.
+- [x] Full AES-256 encryption and decryption replacing deprecated/broken PyPDF2 flags.
+- [x] 14 automated unit tests in `tests/test_phase2.py` passing with 100% success.
 
 ---
 
@@ -123,11 +134,11 @@ The app will undergo a ground-up UI overhaul guided by the **Impeccable** design
 
 ```
 +---------------------------------------------------------------------------------------+
-|  PDF-OPS  [ v1.0 ]              [ Search tools... ]       [ 🌙 / ☀️ ]  [ ⚙️ Settings ] |
+|  PDF-OPS  [ v1.0 ]              [ Search tools... ]       [ 🌙 / ☀️ ]  [ ⚙️ Settings ]|
 +----------------------+------------------------------------------------+---------------+
 |  NAVIGATION          |  PRIMARY WORKSPACE                             |  FILE DETAILS |
 |  ------------------  |  --------------------------------------------  |  ------------ |
-|  [⚡ Quick Actions]  |  +------------------------------------------+  |  annual.pdf   |
+|  [⚡ Quick Actions]   |  +------------------------------------------+  |  annual.pdf   |
 |  [📄 Convert]        |  |                                          |  |  Size: 4.2 MB |
 |  [✏️ Edit & Stamp]   |  |        DROP PDF OR FOLDER HERE           |  |  Pages: 24    |
 |  [🔀 Merge & Split]  |  |           [ Browse Files ]               |  |  Encrypted: No|
@@ -158,6 +169,9 @@ The app will undergo a ground-up UI overhaul guided by the **Impeccable** design
    - Drag-over highlight with animated dashed borders.
    - Indeterminate pulse transitioning to determinate progress during batch tasks.
    - Toast notifications with inline "Open Folder" / "View File" action buttons.
+6. **Prepare Responsive design scheme**
+   - Create and implement important principles that will be needed for Android
+   - Make sure the app looks visually appealing and not cluttered on smaller screens like Android phones
 
 ---
 

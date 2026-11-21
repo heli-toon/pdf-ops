@@ -5,6 +5,8 @@ from pathlib import Path
 import tempfile
 import sys
 
+from pdf_engine import convert_images_to_pdf, convert_office_to_pdf, export_pdf_images
+
 # Import conversion libraries
 try:
     import pymupdf as fitz
@@ -78,6 +80,21 @@ class PDFConverter:
             width=400,
             autofocus=True,
         )
+
+        self.image_dpi = ft.Dropdown(
+            label="Image DPI",
+            options=[ft.dropdown.Option(str(value)) for value in (72, 150, 300)],
+            value="150",
+            width=190,
+            visible=False,
+        )
+        self.image_format = ft.Dropdown(
+            label="Image format",
+            options=[ft.dropdown.Option(value.upper()) for value in ("png", "jpeg", "webp")],
+            value="PNG",
+            width=190,
+            visible=False,
+        )
         
         # Button for conversion
         self.convert_button = ft.Button(
@@ -119,6 +136,9 @@ class PDFConverter:
                 self.select_images_button.visible = False
                 self.convert_button.disabled = False
                 self.selected_files_text.visible = False
+            is_pdf_to_images = self.conversion_dropdown.value == "PDF to Images"
+            self.image_dpi.visible = is_pdf_to_images
+            self.image_format.visible = is_pdf_to_images
             self.page.update()
         
         self.conversion_dropdown.on_change = on_conversion_change
@@ -136,6 +156,7 @@ class PDFConverter:
                 ),
                 ft.Divider(),
                 self.conversion_dropdown,
+                ft.Row([self.image_dpi, self.image_format]),
                 self.select_images_button,
                 self.selected_files_text,
                 ft.Container(height=20),  # Spacer
@@ -230,8 +251,7 @@ class PDFConverter:
             show_snackbar(self.page, f"Error converting PDF to Word: {str(e)}", "error")
             
     def word_to_pdf(self):
-        """Report the external renderer required for this non-native conversion."""
-        show_snackbar(self.page, "Word to PDF requires LibreOffice or Microsoft Word; no file was created.", "info")
+        self._office_to_pdf("Word")
             
     def pdf_to_images(self):
         """Convert PDF to a series of images."""
@@ -246,22 +266,17 @@ class PDFConverter:
             # Convert PDF to images
             update_progress(self.progress_bar, self.progress_text, 0.3, "Converting PDF pages to images...")
             
-            # Use pdf2image to convert PDF to images
-            images = convert_from_path(self.current_file)
-            
-            # Save each page as an image
-            total_pages = len(images)
-            for i, image in enumerate(images):
-                image_path = os.path.join(output_dir, f"page_{i+1}.jpg")
-                image.save(image_path, "JPEG")
-                
-                # Update progress
+            dpi = int(self.image_dpi.value)
+            image_format = self.image_format.value.lower()
+            image_paths = export_pdf_images(self.current_file, output_dir, dpi, image_format)
+            total_pages = len(image_paths)
+            for i, _ in enumerate(image_paths):
                 progress = 0.3 + 0.6 * ((i + 1) / total_pages)
                 update_progress(
                     self.progress_bar, 
                     self.progress_text, 
                     progress, 
-                    f"Saving page {i+1} of {total_pages} as image..."
+                    f"Rendering page {i+1} of {total_pages} at {dpi} DPI..."
                 )
             
             update_progress(self.progress_bar, self.progress_text, 1.0, "Conversion complete!")
@@ -294,50 +309,12 @@ class PDFConverter:
                 f"images_to_pdf_{time.strftime('%Y%m%d_%H%M%S')}.pdf"
             )
             
-            # Open a PDF writer
-            pdf_writer = PyPDF2.PdfWriter()
-            
-            # Sort image files to ensure consistent order
-            self.image_files.sort()
-            
-            # Process each image
+            # Convert images directly to PDF
             total_images = len(self.image_files)
-            for i, image_path in enumerate(self.image_files):
-                # Update progress
-                update_progress(
-                    self.progress_bar, 
-                    self.progress_text, 
-                    0.1 + 0.8 * ((i + 1) / total_images), 
-                    f"Converting image {i+1} of {total_images}..."
-                )
-                
-                # Convert image to PDF using PyMuPDF
-                img = fitz.open(image_path)
-                pdf_bytes = img.convert_to_pdf()
-                img.close()
-                
-                # Create a PyPDF2 PdfReader from the PDF bytes
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
-                    temp_pdf.write(pdf_bytes)
-                    temp_pdf_path = temp_pdf.name
-                
-                # Add the page to the PDF writer
-                with open(temp_pdf_path, "rb") as f:
-                    pdf_reader = PyPDF2.PdfReader(f)
-                    pdf_writer.add_page(pdf_reader.pages[0])
-                
-                # Delete the temporary file
-                os.unlink(temp_pdf_path)
-                
-            # Write the final PDF
-            update_progress(self.progress_bar, self.progress_text, 0.9, "Writing PDF file...")
-            with open(output_file, "wb") as f:
-                pdf_writer.write(f)
+            update_progress(self.progress_bar, self.progress_text, 0.4, f"Converting {total_images} images to PDF...")
+            convert_images_to_pdf(self.image_files, output_file)
             
             update_progress(self.progress_bar, self.progress_text, 1.0, "Conversion complete!")
-            time.sleep(1)  # Allow user to see completion
-            
-            # Reset progress and show success message
             reset_progress(self.progress_bar, self.progress_text)
             show_snackbar(
                 self.page, 
@@ -391,13 +368,23 @@ class PDFConverter:
             show_snackbar(self.page, f"Error converting PDF to Excel: {str(e)}", "error")
     
     def excel_to_pdf(self):
-        """Report the external renderer required for this non-native conversion."""
-        show_snackbar(self.page, "Excel to PDF requires LibreOffice or Microsoft Excel; no file was created.", "info")
+        self._office_to_pdf("Excel")
     
     def pdf_to_ppt(self):
         """Report that this conversion requires a dedicated external engine."""
         show_snackbar(self.page, "PDF to PowerPoint is not available locally yet; no placeholder file was created.", "info")
     
     def ppt_to_pdf(self):
-        """Report the external renderer required for this non-native conversion."""
-        show_snackbar(self.page, "PowerPoint to PDF requires LibreOffice or Microsoft PowerPoint; no file was created.", "info")
+        self._office_to_pdf("PowerPoint")
+
+    def _office_to_pdf(self, source_kind):
+        """Convert Office files through an installed local LibreOffice binary."""
+        try:
+            update_progress(self.progress_bar, self.progress_text, 0.1, f"Starting {source_kind} to PDF conversion...")
+            output = convert_office_to_pdf(self.current_file, self.output_dir)
+            update_progress(self.progress_bar, self.progress_text, 1.0, "Conversion complete!")
+            reset_progress(self.progress_bar, self.progress_text)
+            show_snackbar(self.page, f"{source_kind} successfully converted to PDF: {output}", "success")
+        except Exception as error:
+            reset_progress(self.progress_bar, self.progress_text)
+            show_snackbar(self.page, f"{source_kind} to PDF unavailable: {error}", "warning")
