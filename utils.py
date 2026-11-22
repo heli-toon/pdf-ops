@@ -22,7 +22,10 @@ def get_output_dir():
     """Get the output directory for saving processed files."""
     home = Path.home()
     output_dir = home / "Documents" / "PDF-OPS"
-    os.makedirs(output_dir, exist_ok=True)
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+    except OSError:
+        pass
     return str(output_dir)
 
 def generate_output_filename(input_filename, operation, extension=None):
@@ -42,19 +45,34 @@ def generate_output_filename(input_filename, operation, extension=None):
         
     return f"{base_name}_{operation}_{timestamp}{extension}"
 
-def show_snackbar(page, message, color="success"):
+def open_folder(folder_path: str):
+    """Open folder in OS default file manager safely."""
+    try:
+        if platform.system() == "Windows":
+            os.startfile(folder_path)
+        elif platform.system() == "Darwin":
+            import subprocess
+            subprocess.Popen(["open", folder_path])
+        else:
+            import subprocess
+            subprocess.Popen(["xdg-open", folder_path])
+    except Exception as e:
+        print(f"Could not open folder {folder_path}: {e}")
+
+def show_snackbar(page, message, color="success", action="Dismiss", on_action=None):
     """Show a snackbar notification."""
     color_map = {
-        "success": ft.Colors.GREEN_500,
-        "error": ft.Colors.RED_500,
-        "info": ft.Colors.BLUE_500,
-        "warning": ft.Colors.ORANGE_500,
+        "success": ft.Colors.GREEN_600,
+        "error": ft.Colors.RED_600,
+        "info": ft.Colors.BLUE_600,
+        "warning": ft.Colors.ORANGE_600,
     }
     
     page.snack_bar = ft.SnackBar(
-        content=ft.Text(message),
-        bgcolor=color_map.get(color, ft.Colors.BLUE_500),
-        action="Dismiss",
+        content=ft.Text(message, color=ft.Colors.WHITE, weight=ft.FontWeight.W_500),
+        bgcolor=color_map.get(color, ft.Colors.BLUE_600),
+        action=action,
+        on_action=on_action,
     )
     page.snack_bar.open = True
     page.update()
