@@ -6,10 +6,12 @@ all files on the local machine and raise useful exceptions for the UI to show.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import os
+from pathlib import Path
 import shutil
 import subprocess
-from pathlib import Path
+import uuid
 
 from PIL import Image
 import pymupdf as fitz
@@ -315,3 +317,113 @@ def inspect_pdf(source: str | Path) -> dict:
             "file_size": path.stat().st_size if path.exists() else 0,
             "metadata": document.metadata or {},
         }
+
+
+@dataclass
+class PageDescriptor:
+    """Reactive descriptor of a single PDF page for interactive organization."""
+
+    id: str
+    source_path: str
+    page_index: int  # 0-based index in source_path
+    rotation: int = 0  # 0, 90, 180, 270 degrees relative rotation
+    is_deleted: bool = False
+
+
+def render_page_thumbnail(
+    source: str | Path,
+    page_index: int,
+    rotation: int = 0,
+    max_dim: int = 180,
+) -> bytes:
+    """Render a high-fidelity in-memory PNG thumbnail of a PDF page with cumulative rotation."""
+    with fitz.open(str(source)) as doc:
+        if page_index < 0 or page_index >= doc.page_count:
+            raise IndexError(f"Page index {page_index} out of bounds (document has {doc.page_count} pages)")
+        page = doc[page_index]
+        orig_rect = page.rect
+        scale = max_dim / max(orig_rect.width, orig_rect.height, 1)
+        matrix = fitz.Matrix(scale, scale).prerotate(rotation)
+        pix = page.get_pixmap(matrix=matrix, alpha=False)
+        return pix.tobytes("png")
+
+
+def load_document_descriptors(source: str | Path) -> list[PageDescriptor]:
+    """Inspect a PDF and generate initial PageDescriptor items for each page."""
+    source_path = str(Path(source).resolve())
+    descriptors: list[PageDescriptor] = []
+    with fitz.open(source_path) as doc:
+        if doc.is_encrypted and doc.needs_pass:
+            raise ValueError(f"Document '{Path(source).name}' is password protected. Decrypt it before organizing.")
+        for idx in range(doc.page_count):
+            descriptors.append(
+                PageDescriptor(
+                    id=str(uuid.uuid4())[:8],
+                    source_path=source_path,
+                    page_index=idx,
+                    rotation=0,
+                    is_deleted=False,
+                )
+            )
+    return descriptors
+
+
+def save_organized_pdf(pages: list[PageDescriptor], output_path: str | Path) -> Path:
+    """Export rearranged, rotated, and filtered pages into a bit-perfect PDF without quality loss."""
+    active_pages = [p for p in pages if not p.is_deleted]
+    if not active_pages:
+        raise ValueError("Cannot save an empty PDF. At least one active page is required.")
+
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    source_cache: dict[str, fitz.Document] = {}
+    try:
+        target_doc = fitz.open()
+        for desc in active_pages:
+            src_str = str(desc.source_path)
+            if src_str not in source_cache:
+                source_cache[src_str] = fitz.open(src_str)
+            src_doc = source_cache[src_str]
+            target_doc.insert_pdf(src_doc, from_page=desc.page_index, to_page=desc.page_index)
+            if desc.rotation % 360 != 0:
+                target_page = target_doc[-1]
+                target_page.set_rotation((target_page.rotation + desc.rotation) % 360)
+
+        target_doc.save(out, deflate=True, garbage=3)
+        return out
+    finally:
+        for d in source_cache.values():
+            d.close()
+
+
+def extract_organized_pages(
+    pages: list[PageDescriptor],
+    output_path: str | Path,
+    selected_ids: set[str] | list[str] | None = None,
+) -> Path:
+    """Extract specified or selected pages into a new standalone PDF."""
+    if selected_ids is not None:
+        target_ids = set(selected_ids)
+        target_pages = [p for p in pages if p.id in target_ids and not p.is_deleted]
+    else:
+        target_pages = [p for p in pages if not p.is_deleted]
+
+    if not target_pages:
+        raise ValueError("No pages were selected for extraction.")
+
+    return save_organized_pdf(target_pages, output_path)
+
+
+def insert_document_descriptors(
+    current_pages: list[PageDescriptor],
+    insert_at_index: int,
+    new_source: str | Path,
+) -> list[PageDescriptor]:
+    """Insert pages from another PDF at a specified index in the descriptor list."""
+    new_descriptors = load_document_descriptors(new_source)
+    result = list(current_pages)
+    idx = max(0, min(insert_at_index, len(result)))
+    result[idx:idx] = new_descriptors
+    return result
+

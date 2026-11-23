@@ -19,8 +19,9 @@ from merge import PDFMerger
 from security import PDFSecurity
 from theme import ThemeTokens, make_badge, padding_only, padding_symmetric
 from ui_inspector import DocumentInspector
+from ui_organizer import PageOrganizerView
 from ui_quick_actions import QuickActionsView
-from ui_stubs import OfflineOCRPreview, PageOrganizerPreview
+from ui_stubs import OfflineOCRPreview
 from utils import get_output_dir, open_folder, show_snackbar
 
 
@@ -46,7 +47,7 @@ class PDFOpsApp:
             ("edit", "Edit & Stamp", ft.Icons.EDIT_NOTE, "Watermarks, Rotations, Crops"),
             ("merge", "Merge & Split", ft.Icons.CALL_MERGE, "Reorder, Ranges, Chapters, Compress"),
             ("security", "Security", ft.Icons.SECURITY, "AES-256 Encryption & Permissions"),
-            ("organizer", "Page Manager", ft.Icons.GRID_VIEW, "Visual page organizer preview"),
+            ("organizer", "Page Manager", ft.Icons.GRID_VIEW, "Visual page reorder, rotate & extract"),
             ("ocr", "Offline OCR", ft.Icons.DOCUMENT_SCANNER, "100% on-device text recognition"),
         ]
 
@@ -98,12 +99,20 @@ class PDFOpsApp:
             is_dark_supplier=lambda: self.is_dark_theme,
             navigate_callback=self.switch_tool,
         )
-        self.page_organizer = PageOrganizerPreview(page, self.state, lambda: self.is_dark_theme)
+        self.page_organizer = PageOrganizerView(
+            page=page,
+            app_state=self.state,
+            output_dir=self.output_dir,
+            progress_bar=self.progress_bar,
+            progress_text=self.progress_text,
+            is_dark_supplier=lambda: self.is_dark_theme,
+        )
         self.ocr_view = OfflineOCRPreview(page, self.state, lambda: self.is_dark_theme)
 
         # Contextual Inspector (Pane 3)
         self.inspector = DocumentInspector(page, lambda: self.is_dark_theme)
         self.state.subscribe(self.inspector.set_file)
+        self.state.subscribe(self.page_organizer.set_current_file)
 
         # Build Navigation Items
         self.nav_destinations = [
@@ -112,7 +121,7 @@ class PDFOpsApp:
             ("edit", "Edit & Stamp", ft.Icons.EDIT_NOTE, "Watermarks, Rotations, Crops"),
             ("merge", "Merge & Split", ft.Icons.CALL_MERGE, "Reorder, Ranges, Chapters, Compress"),
             ("security", "Security", ft.Icons.SECURITY, "AES-256 Encryption & Permissions"),
-            ("organizer", "Page Manager", ft.Icons.GRID_VIEW, "Visual page organizer preview"),
+            ("organizer", "Page Manager", ft.Icons.GRID_VIEW, "Visual page reorder, rotate & extract"),
             ("ocr", "Offline OCR", ft.Icons.DOCUMENT_SCANNER, "100% on-device text recognition"),
         ]
 

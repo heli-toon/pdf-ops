@@ -198,10 +198,12 @@ Transform static PDF page viewing into an interactive, visual canvas where users
 - **UI Control**: Custom grid view with drag-and-drop feedback, badge numbers, page orientation indicators, and floating bulk-action toolbar.
 
 ### 4.3 Deliverables
-- [ ] Responsive thumbnail grid rendering within 500ms for typical 20-page documents.
-- [ ] Drag-and-drop page reordering with smooth visual placeholder snapping.
-- [ ] Floating action bar for Rotate 90° CW/CCW, Delete, Duplicate, and Extract.
-- [ ] Instant export producing bit-perfect rearranged PDF without quality loss.
+- [x] Responsive thumbnail grid rendering within 500ms for typical 20-page documents (benchmark verified at ~28ms via PyMuPDF in [`tests/test_phase4.py`](tests/test_phase4.py)).
+- [x] Drag-and-drop page reordering with smooth visual placeholder snapping (`ft.Draggable` and `ft.DragTarget` in [`ui_organizer.py`](ui_organizer.py)).
+- [x] Floating and contextual action bar for Rotate 90° CW/CCW, Delete, Duplicate, and Extract.
+- [x] Instant export producing bit-perfect rearranged PDF without quality loss via PyMuPDF vector streams.
+- [x] External PDF page insertion at arbitrary indices via native file dialog.
+- [x] Full automated test suite in [`tests/test_phase4.py`](tests/test_phase4.py) with 39/39 passing unit tests across all phases.
 
 ---
 

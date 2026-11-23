@@ -130,7 +130,7 @@ def create_pdf_preview(file_path, page, max_pages=5):
             img = ft.Image(
                 src=pix.tobytes("png"),
                 width=400,
-                fit=ft.ImageFit.CONTAIN,
+                fit=ft.BoxFit.CONTAIN,
             )
             pages_column.controls.append(
                 ft.Container(

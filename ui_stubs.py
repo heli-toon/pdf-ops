@@ -11,123 +11,27 @@ import pymupdf as fitz
 
 from app_state import AppState
 from theme import ThemeTokens, make_badge
-from utils import show_snackbar
+from ui_organizer import PageOrganizerView
+from utils import get_output_dir, show_snackbar
 
 
-class PageOrganizerPreview:
+class PageOrganizerPreview(PageOrganizerView):
     """Visual Page Organizer workspace (Phase 4)."""
 
-    def __init__(self, page: ft.Page, app_state: AppState, is_dark_supplier: Callable[[], bool]):
-        self.page = page
-        self.app_state = app_state
-        self.is_dark_supplier = is_dark_supplier
-
-    def _is_dark(self) -> bool:
-        return self.is_dark_supplier()
-
-    def build_ui(self) -> ft.Control:
-        is_dark = self._is_dark()
-        file_path = self.app_state.current_file
-
-        page_cards = []
-        if file_path and os.path.exists(file_path) and file_path.lower().endswith(".pdf"):
-            try:
-                with fitz.open(file_path) as doc:
-                    count = min(doc.page_count, 16)
-                    for i in range(count):
-                        pix = doc[i].get_pixmap(matrix=fitz.Matrix(0.25, 0.25))
-                        page_cards.append(
-                            ft.Container(
-                                content=ft.Column(
-                                    [
-                                        ft.Row(
-                                            [
-                                                make_badge(f"#{i+1}", ThemeTokens.bg_surface(is_dark), ThemeTokens.text_secondary(is_dark)),
-                                                ft.IconButton(
-                                                    ft.Icons.ROTATE_RIGHT,
-                                                    icon_size=16,
-                                                    tooltip="Rotate 90° CW",
-                                                    on_click=lambda e, p=i+1: show_snackbar(self.page, f"Page {p} rotated (Organize mode)", "info"),
-                                                ),
-                                            ],
-                                            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                                        ),
-                                        ft.Image(src=pix.tobytes("png"), height=100, fit=ft.ImageFit.CONTAIN),
-                                    ],
-                                    spacing=4,
-                                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                                ),
-                                padding=8,
-                                border_radius=ThemeTokens.RADIUS_SM,
-                                border=ft.Border.all(1, ThemeTokens.border_muted(is_dark)),
-                                bgcolor=ThemeTokens.bg_card(is_dark),
-                                width=120,
-                            )
-                        )
-            except Exception as e:
-                page_cards.append(ft.Text(f"Could not load thumbnails: {e}", size=11, color=ThemeTokens.ACCENT_WARNING))
-
-        return ft.Column(
-            [
-                ft.Row(
-                    [
-                        ft.Column(
-                            [
-                                ft.Row(
-                                    [
-                                        ft.Text("📑 Visual Page Organizer", size=16, weight=ft.FontWeight.W_700, color=ThemeTokens.text_primary(is_dark)),
-                                        make_badge("Phase 4 Roadmap", ThemeTokens.bg_hover(is_dark), ThemeTokens.ACCENT_CYAN),
-                                    ],
-                                    spacing=8,
-                                ),
-                                ft.Text("Visually reorder, multi-select, duplicate, and batch-rotate document pages", size=12, color=ThemeTokens.text_secondary(is_dark)),
-                            ],
-                            spacing=2,
-                        ),
-                        ft.Row(
-                            [
-                                ft.OutlinedButton("Select All", icon=ft.Icons.SELECT_ALL),
-                                ft.FilledButton("Extract Selection", icon=ft.Icons.CONTENT_COPY),
-                            ],
-                            spacing=8,
-                        ),
-                    ],
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                ),
-                ft.Divider(height=1, color=ThemeTokens.border(is_dark)),
-                ft.Container(
-                    content=ft.Row(
-                        page_cards if page_cards else [
-                            ft.Container(
-                                content=ft.Column(
-                                    [
-                                        ft.Icon(ft.Icons.GRID_VIEW, size=40, color=ThemeTokens.text_muted(is_dark)),
-                                        ft.Text("Load a PDF document to inspect and reorder its visual page grid", size=12, color=ThemeTokens.text_secondary(is_dark)),
-                                    ],
-                                    alignment=ft.MainAxisAlignment.CENTER,
-                                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                                    spacing=8,
-                                ),
-                                padding=40,
-                                alignment=ft.Alignment.CENTER,
-                                expand=True,
-                            )
-                        ],
-                        wrap=True,
-                        spacing=10,
-                        run_spacing=10,
-                        scroll=ft.ScrollMode.AUTO,
-                    ),
-                    expand=True,
-                    padding=10,
-                    border_radius=ThemeTokens.RADIUS_MD,
-                    bgcolor=ThemeTokens.bg_surface(is_dark),
-                ),
-            ],
-            spacing=12,
-            expand=True,
+    def __init__(
+        self,
+        page: ft.Page,
+        app_state: AppState,
+        is_dark_supplier: Callable[[], bool],
+        output_dir: str | None = None,
+        **kwargs,
+    ):
+        super().__init__(
+            page=page,
+            app_state=app_state,
+            output_dir=output_dir or get_output_dir(),
+            is_dark_supplier=is_dark_supplier,
         )
-
 
 class OfflineOCRPreview:
     """True Offline OCR & Text Extraction workspace (Phase 5)."""

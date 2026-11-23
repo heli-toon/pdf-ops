@@ -297,7 +297,7 @@ class DocumentInspector:
                     ft.Container(
                         content=ft.Image(
                             src=img_bytes,
-                            fit=ft.ImageFit.CONTAIN,
+                            fit=ft.BoxFit.CONTAIN,
                             border_radius=ThemeTokens.RADIUS_XS,
                         ),
                         alignment=ft.Alignment.CENTER,
