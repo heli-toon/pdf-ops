@@ -160,26 +160,48 @@ def create_pdf_preview(file_path, page, max_pages=5):
 
 def update_progress(progress_bar, progress_text, value, text=""):
     """Update the progress bar and text."""
-    progress_bar.value = value
-    progress_text.value = text
-    
-    # Make sure progress controls are visible
-    if not progress_bar.visible:
-        progress_bar.visible = True
-        progress_bar.parent.visible = True
-    
-    # Update the progress bar and text
-    progress_bar.update()
-    progress_text.update()
+    if progress_bar:
+        progress_bar.value = value
+        if not progress_bar.visible:
+            progress_bar.visible = True
+            if getattr(progress_bar, "parent", None) is not None:
+                try:
+                    progress_bar.parent.visible = True
+                except Exception:
+                    pass
+        try:
+            progress_bar.update()
+        except Exception:
+            pass
+
+    if progress_text:
+        progress_text.value = text
+        try:
+            progress_text.update()
+        except Exception:
+            pass
 
 def reset_progress(progress_bar, progress_text):
     """Reset the progress bar and hide it."""
-    progress_bar.value = 0
-    progress_text.value = ""
-    progress_bar.visible = False
-    progress_bar.parent.visible = False
-    progress_bar.update()
-    progress_text.update()
+    if progress_bar:
+        progress_bar.value = 0
+        progress_bar.visible = False
+        if getattr(progress_bar, "parent", None) is not None:
+            try:
+                progress_bar.parent.visible = False
+            except Exception:
+                pass
+        try:
+            progress_bar.update()
+        except Exception:
+            pass
+
+    if progress_text:
+        progress_text.value = ""
+        try:
+            progress_text.update()
+        except Exception:
+            pass
 
 def simulate_progress(progress_bar, progress_text, operation_name, callback=None):
     """Simulate progress for operations that don't report progress."""

@@ -12,7 +12,10 @@ from pathlib import Path
 import shutil
 import subprocess
 import uuid
+from collections.abc import Callable
 
+import cv2
+import numpy as np
 from PIL import Image
 import pymupdf as fitz
 
@@ -426,4 +429,304 @@ def insert_document_descriptors(
     idx = max(0, min(insert_at_index, len(result)))
     result[idx:idx] = new_descriptors
     return result
+
+
+def get_tessdata_path(custom_path: str | Path | None = None) -> str:
+    """Return the absolute path to the Tesseract language models directory."""
+    if custom_path is not None:
+        cp = Path(custom_path)
+        if cp.is_dir():
+            return str(cp.resolve())
+        raise FileNotFoundError(f"Specified tessdata directory '{custom_path}' does not exist.")
+
+    env_prefix = os.getenv("TESSDATA_PREFIX")
+    if env_prefix and Path(env_prefix).is_dir():
+        return str(Path(env_prefix).resolve())
+
+    # Check local project tessdata directory
+    local_dir = Path(__file__).resolve().parent / "tessdata"
+    if local_dir.is_dir() and any(local_dir.glob("*.traineddata")):
+        return str(local_dir)
+
+    # Standard Linux system paths
+    for candidate in [
+        Path("/usr/share/tesseract-ocr/5/tessdata"),
+        Path("/usr/share/tesseract-ocr/4.00/tessdata"),
+        Path("/usr/share/tessdata"),
+        Path("/usr/local/share/tessdata"),
+    ]:
+        if candidate.is_dir() and any(candidate.glob("*.traineddata")):
+            return str(candidate)
+
+    # If local directory exists even if empty, return it
+    if local_dir.is_dir():
+        return str(local_dir)
+
+    raise FileNotFoundError(
+        "Tessdata directory containing *.traineddata models was not found. "
+        "Place language models in 'tessdata/' or set TESSDATA_PREFIX."
+    )
+
+
+def get_available_ocr_languages(tessdata_dir: str | Path | None = None) -> list[tuple[str, str]]:
+    """Return list of (language_code, display_name) available in the tessdata directory."""
+    try:
+        tess_path = Path(get_tessdata_path(tessdata_dir))
+    except FileNotFoundError:
+        return [("eng", "English (eng)")]
+
+    lang_names = {
+        "eng": "English (eng)",
+        "fra": "French (fra)",
+        "deu": "German (deu)",
+        "spa": "Spanish (spa)",
+        "ita": "Italian (ita)",
+        "por": "Portuguese (por)",
+        "rus": "Russian (rus)",
+        "chi_sim": "Chinese Simplified (chi_sim)",
+        "chi_tra": "Chinese Traditional (chi_tra)",
+        "jpn": "Japanese (jpn)",
+    }
+
+    found: list[tuple[str, str]] = []
+    traineddata_files = list(tess_path.glob("*.traineddata"))
+    for file in sorted(traineddata_files, key=lambda f: f.name):
+        code = file.stem
+        if code == "osd":
+            continue
+        display_name = lang_names.get(code, f"{code.capitalize()} ({code})")
+        found.append((code, display_name))
+
+    if not found:
+        return [("eng", "English (eng)")]
+
+    # If multiple languages are available, add an Auto multi-language entry
+    if len(found) > 1:
+        combo_code = "+".join(c for c, _ in found)
+        found.append((combo_code, "Multi-Language Auto (All Installed)"))
+
+    return found
+
+
+def preprocess_image_for_ocr(
+    image: fitz.Pixmap | Image.Image | np.ndarray,
+    deskew: bool = True,
+    binarize: bool = False,
+) -> tuple[fitz.Pixmap, float]:
+    """Preprocess image with deskewing and contrast thresholding prior to OCR.
+
+    Returns:
+        (processed_pixmap, detected_skew_angle_degrees)
+    """
+    if isinstance(image, fitz.Pixmap):
+        if image.alpha:
+            clean_pix = fitz.Pixmap(image, 0)
+        else:
+            clean_pix = image
+        img_np = np.frombuffer(clean_pix.samples, dtype=np.uint8).reshape(
+            (clean_pix.height, clean_pix.width, clean_pix.n)
+        )
+        if clean_pix.n == 1:
+            img_bgr = cv2.cvtColor(img_np, cv2.COLOR_GRAY2BGR)
+        elif clean_pix.n == 3:
+            img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+        else:
+            img_bgr = img_np
+    elif isinstance(image, Image.Image):
+        img_rgb = np.array(image.convert("RGB"))
+        img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+    elif isinstance(image, np.ndarray):
+        img_bgr = image.copy()
+        if len(img_bgr.shape) == 2:
+            img_bgr = cv2.cvtColor(img_bgr, cv2.COLOR_GRAY2BGR)
+    else:
+        raise TypeError(f"Unsupported image type: {type(image)}")
+
+    detected_angle = 0.0
+
+    # 1. Deskewing
+    if deskew:
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+        coords = np.column_stack(np.where(thresh > 0))
+        if len(coords) >= 50:
+            rect = cv2.minAreaRect(coords)
+            raw_angle = rect[-1]
+            if raw_angle < -45:
+                angle = -(90 + raw_angle)
+            elif raw_angle > 45:
+                angle = 90 - raw_angle
+            else:
+                angle = -raw_angle
+
+            if 0.5 <= abs(angle) <= 45.0:
+                detected_angle = float(angle)
+                (h, w) = img_bgr.shape[:2]
+                center = (w // 2, h // 2)
+                M = cv2.getRotationMatrix2D(center, detected_angle, 1.0)
+                img_bgr = cv2.warpAffine(
+                    img_bgr,
+                    M,
+                    (w, h),
+                    flags=cv2.INTER_CUBIC,
+                    borderMode=cv2.BORDER_REPLICATE,
+                )
+
+    # 2. Contrast Binarization
+    if binarize:
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        img_bgr = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
+
+    _, png_buf = cv2.imencode(".png", img_bgr)
+    processed_pix = fitz.Pixmap(png_buf.tobytes())
+    return processed_pix, detected_angle
+
+
+def generate_searchable_pdf(
+    source: str | Path,
+    output_path: str | Path,
+    language: str = "eng",
+    dpi: int = 300,
+    deskew: bool = True,
+    binarize: bool = False,
+    tessdata_dir: str | Path | None = None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> Path:
+    """Transform scanned documents or image collections into dual-layer searchable PDFs.
+
+    Creates an output PDF with high-resolution visual scans on top and an invisible,
+    selectable text layer underneath that can be searched using Ctrl+F.
+    """
+    source_path = Path(source)
+    if not source_path.exists():
+        raise FileNotFoundError(f"Source file '{source}' not found.")
+
+    tess_path = get_tessdata_path(tessdata_dir)
+
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    with fitz.open(str(source_path)) as src_doc:
+        if src_doc.is_encrypted and src_doc.needs_pass:
+            raise ValueError(f"Document '{source_path.name}' is password protected. Decrypt it before performing OCR.")
+
+        total_pages = src_doc.page_count
+        if total_pages < 1:
+            raise ValueError("The document has no pages to process.")
+
+        target_doc = fitz.open()
+        try:
+            for idx in range(total_pages):
+                current_page_num = idx + 1
+                if progress_callback:
+                    progress_callback(
+                        current_page_num,
+                        total_pages,
+                        f"Recognizing text on page {current_page_num} of {total_pages}...",
+                    )
+
+                page = src_doc[idx]
+                pix = page.get_pixmap(dpi=dpi, alpha=False)
+
+                if deskew or binarize:
+                    pix, _ = preprocess_image_for_ocr(pix, deskew=deskew, binarize=binarize)
+
+                ocr_bytes = pix.pdfocr_tobytes(language=language, tessdata=tess_path, compress=True)
+                with fitz.open("pdf", ocr_bytes) as ocr_page_doc:
+                    target_doc.insert_pdf(ocr_page_doc)
+
+            if progress_callback:
+                progress_callback(total_pages, total_pages, "Optimizing and writing searchable PDF...")
+
+            target_doc.save(str(out), deflate=True, garbage=3)
+            return out
+        finally:
+            target_doc.close()
+
+
+def extract_document_ocr_text(
+    source: str | Path,
+    language: str = "eng",
+    dpi: int = 150,
+    deskew: bool = False,
+    binarize: bool = False,
+    format_type: str = "plain",
+    tessdata_dir: str | Path | None = None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> str:
+    """Perform on-device OCR and return recognized text as plain text or formatted Markdown."""
+    source_path = Path(source)
+    if not source_path.exists():
+        raise FileNotFoundError(f"Source file '{source}' not found.")
+
+    tess_path = get_tessdata_path(tessdata_dir)
+
+    with fitz.open(str(source_path)) as src_doc:
+        if src_doc.is_encrypted and src_doc.needs_pass:
+            raise ValueError(f"Document '{source_path.name}' is password protected. Decrypt it before performing OCR.")
+
+        total_pages = src_doc.page_count
+        if total_pages < 1:
+            raise ValueError("The document has no pages to process.")
+
+        extracted_pages: list[str] = []
+        for idx in range(total_pages):
+            current_page_num = idx + 1
+            if progress_callback:
+                progress_callback(
+                    current_page_num,
+                    total_pages,
+                    f"Extracting text from page {current_page_num} of {total_pages}...",
+                )
+
+            page = src_doc[idx]
+
+            if not deskew and not binarize:
+                tp = page.get_textpage_ocr(tessdata=tess_path, language=language, dpi=dpi, full=True)
+                page_text = page.get_text(textpage=tp)
+            else:
+                pix = page.get_pixmap(dpi=dpi, alpha=False)
+                pix, _ = preprocess_image_for_ocr(pix, deskew=deskew, binarize=binarize)
+                ocr_bytes = pix.pdfocr_tobytes(language=language, tessdata=tess_path, compress=True)
+                with fitz.open("pdf", ocr_bytes) as ocr_doc:
+                    page_text = ocr_doc[0].get_text()
+
+            extracted_pages.append(page_text.strip())
+
+    if format_type.lower() == "markdown":
+        sections = [f"## Page {i + 1}\n\n{text}" for i, text in enumerate(extracted_pages) if text]
+        return "\n\n---\n\n".join(sections)
+    else:
+        sections = [f"--- Page {i + 1} ---\n{text}" for i, text in enumerate(extracted_pages) if text]
+        return "\n\n".join(sections)
+
+
+def export_ocr_text_file(
+    source: str | Path,
+    output_path: str | Path,
+    language: str = "eng",
+    dpi: int = 150,
+    deskew: bool = False,
+    binarize: bool = False,
+    format_type: str = "plain",
+    tessdata_dir: str | Path | None = None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> Path:
+    """Extract recognized document text and save to a local .txt or .md file."""
+    text_content = extract_document_ocr_text(
+        source=source,
+        language=language,
+        dpi=dpi,
+        deskew=deskew,
+        binarize=binarize,
+        format_type=format_type,
+        tessdata_dir=tessdata_dir,
+        progress_callback=progress_callback,
+    )
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text_content, encoding="utf-8")
+    return out
+
 

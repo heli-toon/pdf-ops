@@ -19,6 +19,7 @@ from merge import PDFMerger
 from security import PDFSecurity
 from theme import ThemeTokens, make_badge, padding_only, padding_symmetric
 from ui_inspector import DocumentInspector
+from ui_ocr import OfflineOCRView
 from ui_organizer import PageOrganizerView
 from ui_quick_actions import QuickActionsView
 from ui_stubs import OfflineOCRPreview
@@ -107,12 +108,20 @@ class PDFOpsApp:
             progress_text=self.progress_text,
             is_dark_supplier=lambda: self.is_dark_theme,
         )
-        self.ocr_view = OfflineOCRPreview(page, self.state, lambda: self.is_dark_theme)
+        self.ocr_view = OfflineOCRView(
+            page=page,
+            app_state=self.state,
+            output_dir=self.output_dir,
+            progress_bar=self.progress_bar,
+            progress_text=self.progress_text,
+            is_dark_supplier=lambda: self.is_dark_theme,
+        )
 
         # Contextual Inspector (Pane 3)
         self.inspector = DocumentInspector(page, lambda: self.is_dark_theme)
         self.state.subscribe(self.inspector.set_file)
         self.state.subscribe(self.page_organizer.set_current_file)
+        self.state.subscribe(self.ocr_view.set_current_file)
 
         # Build Navigation Items
         self.nav_destinations = [
