@@ -22,6 +22,7 @@ from ui_inspector import DocumentInspector
 from ui_ocr import OfflineOCRView
 from ui_organizer import PageOrganizerView
 from ui_quick_actions import QuickActionsView
+from ui_redaction import RedactionSanitizerView
 from ui_stubs import OfflineOCRPreview
 from utils import get_output_dir, open_folder, show_snackbar
 
@@ -50,6 +51,7 @@ class PDFOpsApp:
             ("security", "Security", ft.Icons.SECURITY, "AES-256 Encryption & Permissions"),
             ("organizer", "Page Manager", ft.Icons.GRID_VIEW, "Visual page reorder, rotate & extract"),
             ("ocr", "Offline OCR", ft.Icons.DOCUMENT_SCANNER, "100% on-device text recognition"),
+            ("redaction", "Redact & Sanitize", ft.Icons.PRIVACY_TIP, "Permanent redaction & metadata purge"),
         ]
 
     def main(self, page: ft.Page):
@@ -116,12 +118,21 @@ class PDFOpsApp:
             progress_text=self.progress_text,
             is_dark_supplier=lambda: self.is_dark_theme,
         )
+        self.redaction_view = RedactionSanitizerView(
+            page=page,
+            app_state=self.state,
+            output_dir=self.output_dir,
+            progress_bar=self.progress_bar,
+            progress_text=self.progress_text,
+            is_dark_supplier=lambda: self.is_dark_theme,
+        )
 
         # Contextual Inspector (Pane 3)
         self.inspector = DocumentInspector(page, lambda: self.is_dark_theme)
         self.state.subscribe(self.inspector.set_file)
         self.state.subscribe(self.page_organizer.set_current_file)
         self.state.subscribe(self.ocr_view.set_current_file)
+        self.state.subscribe(self.redaction_view.set_current_file)
 
         # Build Navigation Items
         self.nav_destinations = [
@@ -132,6 +143,7 @@ class PDFOpsApp:
             ("security", "Security", ft.Icons.SECURITY, "AES-256 Encryption & Permissions"),
             ("organizer", "Page Manager", ft.Icons.GRID_VIEW, "Visual page reorder, rotate & extract"),
             ("ocr", "Offline OCR", ft.Icons.DOCUMENT_SCANNER, "100% on-device text recognition"),
+            ("redaction", "Redact & Sanitize", ft.Icons.PRIVACY_TIP, "Permanent redaction & metadata purge"),
         ]
 
         # Setup Containers
@@ -388,6 +400,7 @@ class PDFOpsApp:
             "security": self.security.build_ui,
             "organizer": self.page_organizer.build_ui,
             "ocr": self.ocr_view.build_ui,
+            "redaction": self.redaction_view.build_ui,
         }
 
         active_builder = tool_view_map.get(self.active_tool_id, self.quick_actions.build_ui)

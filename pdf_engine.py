@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import uuid
@@ -728,5 +729,601 @@ def export_ocr_text_file(
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(text_content, encoding="utf-8")
     return out
+
+
+# =============================================================================
+# Phase 6: Permanent Redaction & Metadata Sanitizer
+# =============================================================================
+
+REDACTION_PATTERNS: dict[str, tuple[str, str]] = {
+    "email": (
+        "Email Addresses",
+        r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
+    ),
+    "phone": (
+        "Phone Numbers",
+        r"(?:\+?\d{1,3}[\s.-]?)?(?:\(\d{2,4}\)|\d{3})[\s.-]?\d{3}[\s.-]?\d{4}\b",
+    ),
+    "ssn": (
+        "SSN / National IDs",
+        r"\b\d{3}[-\s]\d{2}[-\s]\d{4}\b",
+    ),
+    "credit_card": (
+        "Credit Card Numbers",
+        r"\b(?:\d{4}[-\s]?){3}\d{4}\b|\b\d{4}[-\s]?\d{6}[-\s]?\d{5}\b",
+    ),
+}
+
+_STANDARD_METADATA_KEYS = (
+    "title",
+    "author",
+    "subject",
+    "keywords",
+    "creator",
+    "producer",
+    "creationDate",
+    "modDate",
+    "trapped",
+)
+
+
+@dataclass
+class RedactionBox:
+    """Single rectangular redaction region in PDF page point coordinates."""
+
+    id: str
+    page_index: int  # 0-based page index
+    rect: tuple[float, float, float, float]  # (x0, y0, x1, y1) in PDF points
+    label: str = "Manual Region"
+    category: str = "manual"
+    matched_text: str = ""
+    enabled: bool = True
+
+
+@dataclass
+class PatternMatch:
+    """Sensitive pattern match discovered on a PDF page."""
+
+    id: str
+    page_index: int  # 0-based page index
+    category: str
+    category_label: str
+    matched_text: str
+    rects: list[tuple[float, float, float, float]] = field(default_factory=list)
+    selected: bool = True
+
+
+def _normalize_rect(rect: tuple[float, float, float, float] | fitz.Rect) -> tuple[float, float, float, float]:
+    r = fitz.Rect(rect)
+    r.normalize()
+    return (float(r.x0), float(r.y0), float(r.x1), float(r.y1))
+
+
+def _find_match_rects_on_page(page: fitz.Page, matched_text: str) -> list[tuple[float, float, float, float]]:
+    """Locate bounding rectangles for a matched string on a PDF page."""
+    rects = page.search_for(matched_text)
+    if rects:
+        return [_normalize_rect(r) for r in rects]
+
+    # Fallback: normalize whitespace and check word sequences if PDF layout split tokens
+    target_norm = re.sub(r"\s+", "", matched_text)
+    if not target_norm:
+        return []
+
+    words = page.get_text("words")  # (x0, y0, x1, y1, word, block_no, line_no, word_no)
+    found: list[tuple[float, float, float, float]] = []
+    n = len(words)
+    for start in range(n):
+        combined = ""
+        union_rect: fitz.Rect | None = None
+        for end in range(start, min(start + 12, n)):
+            w_rect = fitz.Rect(words[end][:4])
+            w_text = str(words[end][4])
+            combined += w_text
+            union_rect = w_rect if union_rect is None else (union_rect | w_rect)
+            if combined == target_norm:
+                found.append(_normalize_rect(union_rect))
+                break
+            if not target_norm.startswith(combined):
+                break
+    return found
+
+
+def scan_pdf_patterns(
+    source: str | Path,
+    categories: list[str] | None = None,
+    custom_regex: str | None = None,
+    case_sensitive: bool = False,
+) -> list[PatternMatch]:
+    """Scan a PDF document for sensitive regex patterns and locate their page coordinates."""
+    source_path = Path(source)
+    if not source_path.exists():
+        raise FileNotFoundError(f"Source file '{source}' not found.")
+
+    active_categories = list(REDACTION_PATTERNS.keys()) if categories is None else list(categories)
+    compiled_patterns: list[tuple[str, str, re.Pattern[str]]] = []
+    flags = 0 if case_sensitive else re.IGNORECASE
+
+    for cat in active_categories:
+        if cat in REDACTION_PATTERNS:
+            label, expr = REDACTION_PATTERNS[cat]
+            compiled_patterns.append((cat, label, re.compile(expr, flags)))
+
+    if custom_regex and custom_regex.strip():
+        try:
+            compiled_patterns.append(("custom", "Custom Pattern", re.compile(custom_regex.strip(), flags)))
+        except re.error as err:
+            raise ValueError(f"Invalid custom regex pattern: {err}") from err
+
+    if not compiled_patterns:
+        return []
+
+    matches: list[PatternMatch] = []
+    with fitz.open(str(source_path)) as doc:
+        if doc.is_encrypted and doc.needs_pass:
+            raise ValueError(f"Document '{source_path.name}' is password protected. Decrypt it before scanning.")
+
+        for page_index in range(doc.page_count):
+            page = doc[page_index]
+            page_text = page.get_text("text") or ""
+            seen_on_page: set[tuple[str, str]] = set()
+
+            for cat, cat_label, pattern in compiled_patterns:
+                for m in pattern.finditer(page_text):
+                    matched_str = m.group(0).strip()
+                    if not matched_str:
+                        continue
+                    dedup_key = (cat, matched_str)
+                    if dedup_key in seen_on_page:
+                        continue
+                    seen_on_page.add(dedup_key)
+
+                    rects = _find_match_rects_on_page(page, matched_str)
+                    if not rects:
+                        continue
+                    matches.append(
+                        PatternMatch(
+                            id=str(uuid.uuid4())[:8],
+                            page_index=page_index,
+                            category=cat,
+                            category_label=cat_label,
+                            matched_text=matched_str,
+                            rects=rects,
+                            selected=True,
+                        )
+                    )
+
+    return matches
+
+
+def _count_icc_profiles(doc: fitz.Document) -> list[int]:
+    """Return xref numbers of ICCBased color profile streams in the document."""
+    icc_xrefs: list[int] = []
+    for xref in range(1, doc.xref_length()):
+        try:
+            obj_str = doc.xref_object(xref, compressed=False)
+        except Exception:
+            continue
+        if "/ICCBased" in obj_str or ("/N " in obj_str and "/Alternate" in obj_str and doc.xref_is_stream(xref)):
+            if doc.xref_is_stream(xref):
+                n_val = doc.xref_get_key(xref, "N")
+                if n_val[0] == "int" and n_val[1] in ("1", "3", "4"):
+                    icc_xrefs.append(xref)
+    return icc_xrefs
+
+
+def _has_output_intents(doc: fitz.Document) -> bool:
+    """Return True if PDF root catalog contains OutputIntents color profiles."""
+    try:
+        catalog_xref = doc.pdf_catalog()
+        oi = doc.xref_get_key(catalog_xref, "OutputIntents")
+        return oi[0] != "null"
+    except Exception:
+        return False
+
+
+def _list_thumbnail_pages(doc: fitz.Document) -> list[int]:
+    """Return 1-based page numbers that contain embedded /Thumb page thumbnails."""
+    thumb_pages: list[int] = []
+    for idx in range(doc.page_count):
+        try:
+            page_xref = doc[idx].xref
+            thumb_key = doc.xref_get_key(page_xref, "Thumb")
+            if thumb_key[0] != "null":
+                thumb_pages.append(idx + 1)
+        except Exception:
+            continue
+    return thumb_pages
+
+
+def inspect_pdf_metadata(source: str | Path) -> dict:
+    """Inspect standard Info dictionary, XMP packets, thumbnails, color profiles, and embedded files."""
+    source_path = Path(source)
+    if not source_path.exists():
+        raise FileNotFoundError(f"Source file '{source}' not found.")
+
+    with fitz.open(str(source_path)) as doc:
+        if doc.is_encrypted and doc.needs_pass:
+            raise ValueError(f"Document '{source_path.name}' is password protected. Decrypt it first.")
+
+        raw_meta = doc.metadata or {}
+        info_fields = {
+            k: str(raw_meta[k])
+            for k in _STANDARD_METADATA_KEYS
+            if raw_meta.get(k)
+        }
+        xmp_xml = ""
+        try:
+            xmp_xml = doc.get_xml_metadata() or ""
+        except Exception:
+            xmp_xml = ""
+
+        thumb_pages = _list_thumbnail_pages(doc)
+        has_output_intents = _has_output_intents(doc)
+        icc_xrefs = _count_icc_profiles(doc)
+        embedded_names = list(doc.embfile_names()) if hasattr(doc, "embfile_names") else []
+
+        total_findings = (
+            len(info_fields)
+            + (1 if xmp_xml else 0)
+            + len(thumb_pages)
+            + (1 if has_output_intents else 0)
+            + len(icc_xrefs)
+            + len(embedded_names)
+        )
+
+        return {
+            "info_fields": info_fields,
+            "has_xmp": bool(xmp_xml),
+            "xmp_bytes": len(xmp_xml.encode("utf-8")) if xmp_xml else 0,
+            "thumbnail_pages": thumb_pages,
+            "has_output_intents": has_output_intents,
+            "icc_profile_count": len(icc_xrefs),
+            "embedded_files": embedded_names,
+            "total_findings": total_findings,
+        }
+
+
+def _strip_color_profiles(doc: fitz.Document) -> int:
+    """Remove OutputIntents from catalog and replace ICCBased color spaces with device equivalents."""
+    removed_count = 0
+    try:
+        catalog_xref = doc.pdf_catalog()
+        oi = doc.xref_get_key(catalog_xref, "OutputIntents")
+        if oi[0] != "null":
+            doc.xref_set_key(catalog_xref, "OutputIntents", "null")
+            removed_count += 1
+    except Exception:
+        pass
+
+    # Map ICCBased streams to safe DeviceGray/DeviceRGB/DeviceCMYK where referenced in ColorSpace dicts
+    icc_device_map: dict[int, str] = {}
+    for xref in _count_icc_profiles(doc):
+        n_val = doc.xref_get_key(xref, "N")
+        if n_val[1] == "1":
+            icc_device_map[xref] = "/DeviceGray"
+        elif n_val[1] == "4":
+            icc_device_map[xref] = "/DeviceCMYK"
+        else:
+            icc_device_map[xref] = "/DeviceRGB"
+
+    if icc_device_map:
+        for xref in range(1, doc.xref_length()):
+            try:
+                cs_key = doc.xref_get_key(xref, "ColorSpace")
+            except Exception:
+                continue
+            if cs_key[0] == "array" and "/ICCBased" in cs_key[1]:
+                for icc_xref, dev_space in icc_device_map.items():
+                    if f"{icc_xref} 0 R" in cs_key[1]:
+                        doc.xref_set_key(xref, "ColorSpace", dev_space)
+                        removed_count += 1
+                        break
+
+    return removed_count
+
+
+def _sanitize_open_document(
+    doc: fitz.Document,
+    remove_info: bool = True,
+    remove_xmp: bool = True,
+    remove_thumbnails: bool = True,
+    remove_color_profiles: bool = True,
+    remove_embedded_files: bool = True,
+) -> dict:
+    """Sanitize metadata in an open PyMuPDF document and return a detailed report of deleted fields."""
+    raw_meta = doc.metadata or {}
+    removed_info_fields = {
+        k: str(raw_meta[k])
+        for k in _STANDARD_METADATA_KEYS
+        if remove_info and raw_meta.get(k)
+    }
+
+    xmp_xml = ""
+    try:
+        xmp_xml = doc.get_xml_metadata() or ""
+    except Exception:
+        xmp_xml = ""
+    removed_xmp_bytes = len(xmp_xml.encode("utf-8")) if (remove_xmp and xmp_xml) else 0
+
+    thumb_pages = _list_thumbnail_pages(doc) if remove_thumbnails else []
+    embedded_names = list(doc.embfile_names()) if (remove_embedded_files and hasattr(doc, "embfile_names")) else []
+
+    deleted_items: list[str] = []
+
+    if remove_info:
+        doc.set_metadata({})
+        try:
+            trailer_info = doc.xref_get_key(-1, "Info")
+            if trailer_info[0] != "null":
+                doc.xref_set_key(-1, "Info", "null")
+        except Exception:
+            pass
+        for k, v in removed_info_fields.items():
+            deleted_items.append(f"Info.{k}: {v}")
+
+    if remove_xmp:
+        try:
+            doc.del_xml_metadata()
+        except Exception:
+            pass
+        try:
+            catalog_xref = doc.pdf_catalog()
+            if doc.xref_get_key(catalog_xref, "Metadata")[0] != "null":
+                doc.xref_set_key(catalog_xref, "Metadata", "null")
+        except Exception:
+            pass
+        if removed_xmp_bytes:
+            deleted_items.append(f"XMP XML Metadata Packet ({removed_xmp_bytes} bytes)")
+
+    if remove_thumbnails:
+        for page_num in thumb_pages:
+            try:
+                doc.xref_set_key(doc[page_num - 1].xref, "Thumb", "null")
+            except Exception:
+                pass
+        if thumb_pages:
+            deleted_items.append(f"Embedded Page Thumbnails ({len(thumb_pages)} pages)")
+
+    removed_color_profiles_count = 0
+    if remove_color_profiles:
+        removed_color_profiles_count = _strip_color_profiles(doc)
+        if removed_color_profiles_count:
+            deleted_items.append(f"Color Profiles / OutputIntents ({removed_color_profiles_count})")
+
+    doc.scrub(
+        attached_files=remove_embedded_files,
+        clean_pages=False,
+        embedded_files=remove_embedded_files,
+        hidden_text=False,
+        javascript=True,
+        metadata=remove_info,
+        redactions=False,
+        remove_links=False,
+        reset_fields=False,
+        reset_responses=False,
+        thumbnails=remove_thumbnails,
+        xml_metadata=remove_xmp,
+    )
+
+    if embedded_names:
+        deleted_items.append(f"Embedded Files ({len(embedded_names)}: {', '.join(embedded_names)})")
+
+    return {
+        "removed_info_fields": removed_info_fields,
+        "removed_xmp": bool(removed_xmp_bytes),
+        "removed_xmp_bytes": removed_xmp_bytes,
+        "removed_thumbnails_count": len(thumb_pages),
+        "removed_color_profiles_count": removed_color_profiles_count,
+        "removed_embedded_files_count": len(embedded_names),
+        "deleted_items": deleted_items,
+    }
+
+
+def sanitize_pdf_metadata(
+    source: str | Path,
+    output_path: str | Path,
+    remove_info: bool = True,
+    remove_xmp: bool = True,
+    remove_thumbnails: bool = True,
+    remove_color_profiles: bool = True,
+    remove_embedded_files: bool = True,
+) -> dict:
+    """Purge document metadata, timestamps, XMP XML, embedded thumbnails, and color profiles."""
+    source_path = Path(source)
+    if not source_path.exists():
+        raise FileNotFoundError(f"Source file '{source}' not found.")
+
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    with fitz.open(str(source_path)) as doc:
+        if doc.is_encrypted and doc.needs_pass:
+            raise ValueError(f"Document '{source_path.name}' is password protected. Decrypt it before sanitizing.")
+
+        report = _sanitize_open_document(
+            doc,
+            remove_info=remove_info,
+            remove_xmp=remove_xmp,
+            remove_thumbnails=remove_thumbnails,
+            remove_color_profiles=remove_color_profiles,
+            remove_embedded_files=remove_embedded_files,
+        )
+        doc.save(str(out), garbage=4, clean=True, deflate=True)
+
+    report["output_path"] = str(out)
+    return report
+
+
+def apply_pdf_redactions(
+    source: str | Path,
+    output_path: str | Path,
+    redactions: list[RedactionBox | dict],
+    fill_color: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    redact_images: bool = True,
+    sanitize_metadata: bool = False,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> dict:
+    """Permanently redact specified regions from PDF streams and optionally sanitize metadata."""
+    source_path = Path(source)
+    if not source_path.exists():
+        raise FileNotFoundError(f"Source file '{source}' not found.")
+
+    active_boxes: list[RedactionBox] = []
+    for item in redactions:
+        if isinstance(item, RedactionBox):
+            if item.enabled:
+                active_boxes.append(item)
+        elif isinstance(item, dict):
+            if item.get("enabled", True):
+                active_boxes.append(
+                    RedactionBox(
+                        id=str(item.get("id", str(uuid.uuid4())[:8])),
+                        page_index=int(item["page_index"]),
+                        rect=tuple(item["rect"]),  # type: ignore[arg-type]
+                        label=str(item.get("label", "Redaction")),
+                        category=str(item.get("category", "manual")),
+                        matched_text=str(item.get("matched_text", "")),
+                        enabled=True,
+                    )
+                )
+
+    if not active_boxes and not sanitize_metadata:
+        raise ValueError("No redaction regions or metadata sanitization options were selected.")
+
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    by_page: dict[int, list[RedactionBox]] = {}
+    for box in active_boxes:
+        by_page.setdefault(box.page_index, []).append(box)
+
+    with fitz.open(str(source_path)) as doc:
+        if doc.is_encrypted and doc.needs_pass:
+            raise ValueError(f"Document '{source_path.name}' is password protected. Decrypt it before redacting.")
+
+        total_pages = max(len(by_page), 1)
+        pages_redacted = 0
+        regions_applied = 0
+
+        image_mode = fitz.PDF_REDACT_IMAGE_PIXELS if redact_images else fitz.PDF_REDACT_IMAGE_NONE
+
+        for step, (page_idx, boxes) in enumerate(sorted(by_page.items()), start=1):
+            if page_idx < 0 or page_idx >= doc.page_count:
+                raise IndexError(f"Page index {page_idx} out of range (0..{doc.page_count - 1})")
+
+            if progress_callback:
+                progress_callback(step, total_pages, f"Applying permanent redactions to page {page_idx + 1}...")
+
+            page = doc[page_idx]
+            for box in boxes:
+                r = fitz.Rect(box.rect)
+                r.normalize()
+                if r.width <= 0 or r.height <= 0:
+                    continue
+                page.add_redact_annot(r, fill=fill_color)
+                regions_applied += 1
+
+            page.apply_redactions(
+                images=image_mode,
+                graphics=fitz.PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED,
+                text=fitz.PDF_REDACT_TEXT_REMOVE,
+            )
+            pages_redacted += 1
+
+        metadata_report = None
+        if sanitize_metadata:
+            if progress_callback:
+                progress_callback(total_pages, total_pages, "Sanitizing document metadata & XMP streams...")
+            metadata_report = _sanitize_open_document(doc)
+
+        doc.save(str(out), garbage=4, clean=True, deflate=True)
+
+    return {
+        "output_path": str(out),
+        "pages_redacted": pages_redacted,
+        "regions_applied": regions_applied,
+        "metadata_report": metadata_report,
+    }
+
+
+def verify_zero_leakage(
+    redacted_pdf: str | Path,
+    forbidden_strings: list[str],
+) -> dict:
+    """Verify that redacted strings cannot be extracted, searched, or found in PDF streams."""
+    pdf_path = Path(redacted_pdf)
+    if not pdf_path.exists():
+        raise FileNotFoundError(f"Redacted PDF '{redacted_pdf}' not found.")
+
+    clean_targets = [s for s in dict.fromkeys(forbidden_strings) if s and s.strip()]
+    leaked: list[str] = []
+
+    with fitz.open(str(pdf_path)) as doc:
+        all_text_parts: list[str] = []
+        for page in doc:
+            all_text_parts.append(page.get_text("text") or "")
+            word_tuples = page.get_text("words") or []
+            all_text_parts.append(" ".join(str(w[4]) for w in word_tuples))
+            for target in clean_targets:
+                if page.search_for(target):
+                    if target not in leaked:
+                        leaked.append(target)
+
+        joined_text = "\n".join(all_text_parts)
+        for target in clean_targets:
+            if target in joined_text and target not in leaked:
+                leaked.append(target)
+
+        # Also inspect uncompressed content streams for residual literal text
+        for page in doc:
+            for xref in page.get_contents():
+                try:
+                    stream_bytes = doc.xref_stream(xref) or b""
+                except Exception:
+                    continue
+                for target in clean_targets:
+                    if target.encode("utf-8", errors="ignore") in stream_bytes:
+                        if target not in leaked:
+                            leaked.append(target)
+
+    return {
+        "verified": len(leaked) == 0,
+        "leaked_strings": leaked,
+        "checked_count": len(clean_targets),
+    }
+
+
+def render_redaction_page_preview(
+    source: str | Path,
+    page_index: int = 0,
+    max_width: int = 540,
+    max_height: int = 620,
+) -> dict:
+    """Render a PDF page to PNG bytes alongside its canvas dimensions and PDF-point scale factor."""
+    source_path = Path(source)
+    if not source_path.exists():
+        raise FileNotFoundError(f"Source file '{source}' not found.")
+
+    with fitz.open(str(source_path)) as doc:
+        if doc.is_encrypted and doc.needs_pass:
+            raise ValueError(f"Document '{source_path.name}' is password protected. Decrypt it first.")
+        if page_index < 0 or page_index >= doc.page_count:
+            raise IndexError(f"Page index {page_index} out of bounds (document has {doc.page_count} pages)")
+
+        page = doc[page_index]
+        rect = page.rect
+        scale = min(max_width / max(rect.width, 1.0), max_height / max(rect.height, 1.0))
+        pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+        return {
+            "png_bytes": pix.tobytes("png"),
+            "canvas_width": float(pix.width),
+            "canvas_height": float(pix.height),
+            "page_width": float(rect.width),
+            "page_height": float(rect.height),
+            "scale": float(scale),
+            "page_count": doc.page_count,
+        }
+
 
 
