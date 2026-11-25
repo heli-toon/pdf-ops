@@ -73,10 +73,7 @@ class PDFOpsApp:
         # File Picker setup
         def on_file_selected(e: ft.FilePickerResultEvent):
             if e.files and e.files[0].path:
-                selected_path = e.files[0].path
-                self.state.select_file(selected_path)
-                self.update_file_dropzone()
-                show_snackbar(page, f"Loaded: {os.path.basename(selected_path)}", "info")
+                self._apply_selected_file(e.files[0].path)
 
         self.file_picker = ft.FilePicker(on_result=on_file_selected)
         page.services.append(self.file_picker)
@@ -180,13 +177,28 @@ class PDFOpsApp:
         # Initial layout rendering
         self.render_layout()
 
+    def _apply_selected_file(self, selected_path: str):
+        """Propagate a newly picked file path across AppState and update UI."""
+        self.state.select_file(selected_path)
+        self.update_file_dropzone()
+        show_snackbar(self.page, f"Loaded: {os.path.basename(selected_path)}", "info")
+
     def trigger_file_browser(self):
-        """Open native file dialog."""
-        self.file_picker.pick_files(
-            file_type=ft.FilePickerFileType.CUSTOM,
-            allowed_extensions=["pdf", "docx", "xlsx", "pptx", "png", "jpg", "jpeg", "webp"],
-            allow_multiple=False,
-        )
+        """Open native file dialog asynchronously via Flet 1.x run_task."""
+        async def _pick():
+            try:
+                files = await self.file_picker.pick_files(
+                    dialog_title="Select Document — PDF-Ops",
+                    file_type=ft.FilePickerFileType.CUSTOM,
+                    allowed_extensions=["pdf", "docx", "xlsx", "pptx", "png", "jpg", "jpeg", "webp"],
+                    allow_multiple=False,
+                )
+                if files and files[0].path:
+                    self._apply_selected_file(files[0].path)
+            except Exception as err:
+                show_snackbar(self.page, f"File picker error: {err}", "error")
+
+        self.page.run_task(_pick)
 
     def toggle_theme(self, e):
         """Toggle between Slate Dark and Crisp Paper Light themes."""

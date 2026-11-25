@@ -317,17 +317,32 @@ class PageOrganizerView:
 
     def trigger_insert_pdf(self, e=None) -> None:
         """Open file picker to select an external PDF to insert."""
-        self.insert_picker.pick_files(
-            file_type=ft.FilePickerFileType.CUSTOM,
-            allowed_extensions=["pdf"],
-            allow_multiple=False,
-        )
+        async def _pick():
+            try:
+                files = await self.insert_picker.pick_files(
+                    dialog_title="Select PDF to Insert — PDF-Ops",
+                    file_type=ft.FilePickerFileType.CUSTOM,
+                    allowed_extensions=["pdf"],
+                    allow_multiple=False,
+                )
+                if files:
+                    self._insert_files(files)
+            except Exception as ex:
+                show_snackbar(self.page, f"File picker error: {ex}", "error")
+
+        self.page.run_task(_pick)
 
     def _on_insert_pdf_selected(self, e: ft.FilePickerResultEvent) -> None:
         """Handle picked PDF for page insertion."""
-        if not e.files or not e.files[0].path:
+        if not e.files:
             return
-        new_pdf_path = e.files[0].path
+        self._insert_files(e.files)
+
+    def _insert_files(self, files) -> None:
+        """Insert pages from the first picked PDF file."""
+        if not files or not files[0].path:
+            return
+        new_pdf_path = files[0].path
         if not os.path.exists(new_pdf_path):
             return
 

@@ -117,6 +117,7 @@ class PDFEditor:
                 icon=ft.Icons.IMAGE,
                 action=ft.PickFiles(
                     self.image_picker,
+                    dialog_title="Select Image Overlay — PDF-Ops",
                     file_type=ft.FilePickerFileType.CUSTOM,
                     allowed_extensions=["jpg", "jpeg", "png"],
                 ),
@@ -324,9 +325,9 @@ class PDFEditor:
             crop_page_range.visible = (self.crop_controls.controls[2].value == "Custom Range")
             self.page.update()
             
-        self.edit_dropdown.on_change = on_edit_change
-        self.rotate_controls.controls[1].on_change = on_rotate_pages_change
-        self.crop_controls.controls[2].on_change = on_crop_pages_change
+        self.edit_dropdown.on_select = on_edit_change
+        self.rotate_controls.controls[1].on_select = on_rotate_pages_change
+        self.crop_controls.controls[2].on_select = on_crop_pages_change
         
         # Main container
         return ft.Container(

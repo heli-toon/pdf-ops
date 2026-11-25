@@ -88,6 +88,7 @@ class PDFMerger:
             icon=ft.Icons.FILE_COPY,
             action=ft.PickFiles(
                 self.pdf_picker,
+                dialog_title="Select PDFs to Merge — PDF-Ops",
                 file_type=ft.FilePickerFileType.CUSTOM,
                 allowed_extensions=["pdf"],
                 allow_multiple=True,
@@ -190,7 +191,7 @@ class PDFMerger:
             self.split_range.visible = (self.split_dropdown.value == "Split by custom range")
             self.page.update()
             
-        self.split_dropdown.on_change = on_split_method_change
+        self.split_dropdown.on_select = on_split_method_change
         
         return ft.Column([
             ft.Text("Split a single PDF into multiple files"),

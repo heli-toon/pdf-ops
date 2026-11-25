@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import sys
 
-from pdf_engine import convert_images_to_pdf, convert_office_to_pdf, export_pdf_images
+from pdf_engine import convert_images_to_pdf, convert_office_to_pdf, export_pdf_images, find_office_converter
 
 # Import conversion libraries
 try:
@@ -67,8 +67,151 @@ class PDFConverter:
             "Word": ".docx",
             "Excel": ".xlsx",
             "PowerPoint": ".pptx",
-            "Images": [".jpg", ".jpeg", ".png"],
+            "Images": [".jpg", ".jpeg", ".png", ".webp"],
         }
+        self.image_files = []
+
+    def _allowed_conversions_for_file(self, file_path: str | None) -> list[str]:
+        """Return conversion types compatible with the active file's extension."""
+        if not file_path:
+            return list(self.conversion_types.keys())
+
+        ext = Path(file_path).suffix.lower()
+        if ext == ".pdf":
+            return ["PDF to Word", "PDF to Images", "PDF to Excel", "PDF to PowerPoint"]
+        if ext in (".docx", ".doc"):
+            return ["Word to PDF"]
+        if ext in (".xlsx", ".xls"):
+            return ["Excel to PDF"]
+        if ext in (".pptx", ".ppt"):
+            return ["PowerPoint to PDF"]
+        if ext in (".jpg", ".jpeg", ".png", ".webp"):
+            return ["Images to PDF"]
+        return []
+
+    def _set_status_banner(self, message: str | None, level: str = "info") -> None:
+        """Show or hide an inline status/capability notice in the Convert workspace."""
+        if not hasattr(self, "status_banner"):
+            return
+        if not message:
+            self.status_banner.visible = False
+            self.status_banner.content = None
+            return
+
+        color_map = {
+            "info": ft.Colors.BLUE_400,
+            "warning": ft.Colors.AMBER_400,
+            "error": ft.Colors.RED_400,
+            "success": ft.Colors.GREEN_400,
+        }
+        icon_map = {
+            "info": ft.Icons.INFO_OUTLINE,
+            "warning": ft.Icons.WARNING_AMBER_ROUNDED,
+            "error": ft.Icons.ERROR_OUTLINE,
+            "success": ft.Icons.CHECK_CIRCLE_OUTLINE,
+        }
+        accent = color_map.get(level, ft.Colors.BLUE_400)
+        self.status_banner.content = ft.Row(
+            [
+                ft.Icon(icon_map.get(level, ft.Icons.INFO_OUTLINE), size=18, color=accent),
+                ft.Text(message, size=12, expand=True),
+            ],
+            spacing=8,
+        )
+        self.status_banner.border = ft.Border.all(1, accent)
+        self.status_banner.visible = True
+
+    def _sync_conversion_state(self, update_page: bool = True) -> None:
+        """Filter dropdown options, toggle option controls, and validate readiness."""
+        if not hasattr(self, "conversion_dropdown"):
+            return
+
+        allowed = self._allowed_conversions_for_file(self.current_file)
+        self.conversion_dropdown.options = [
+            ft.dropdown.Option(conv_type) for conv_type in allowed
+        ]
+
+        if not allowed:
+            self.conversion_dropdown.value = None
+        elif self.conversion_dropdown.value not in allowed:
+            self.conversion_dropdown.value = allowed[0]
+
+        selected = self.conversion_dropdown.value
+
+        # If an image file is loaded as active document, pre-seed image_files for Images to PDF
+        if self.current_file and Path(self.current_file).suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"):
+            if self.current_file not in self.image_files:
+                self.image_files = [self.current_file]
+
+        is_images_to_pdf = selected == "Images to PDF"
+        is_pdf_to_images = selected == "PDF to Images"
+
+        self.select_images_button.visible = is_images_to_pdf
+        self.image_dpi.visible = is_pdf_to_images
+        self.image_format.visible = is_pdf_to_images
+
+        if is_images_to_pdf and self.image_files:
+            self.selected_files_text.value = f"Selected {len(self.image_files)} image(s)"
+            self.selected_files_text.visible = True
+        else:
+            self.selected_files_text.visible = False
+
+        # Determine whether the selected conversion can actually run
+        if not LIBRARIES_LOADED:
+            self.convert_button.disabled = True
+            self._set_status_banner(
+                "Conversion libraries failed to load. Please reinstall requirements and restart.",
+                "error",
+            )
+        elif self.current_file and not allowed:
+            ext = Path(self.current_file).suffix or "unknown"
+            self.convert_button.disabled = True
+            self._set_status_banner(
+                f"No conversions are supported for '{ext}' files.",
+                "warning",
+            )
+        elif not selected:
+            self.convert_button.disabled = True
+            self._set_status_banner("Select a conversion type to continue.", "info")
+        elif selected == "PDF to PowerPoint":
+            self.convert_button.disabled = True
+            self._set_status_banner(
+                "PDF to PowerPoint conversion is not supported locally yet. Choose PDF to Word, PDF to Images, or PDF to Excel instead.",
+                "warning",
+            )
+        elif selected in ("Word to PDF", "Excel to PDF", "PowerPoint to PDF") and not find_office_converter():
+            self.convert_button.disabled = True
+            self._set_status_banner(
+                f"{selected} requires LibreOffice (soffice) on PATH, which was not detected on this system.",
+                "warning",
+            )
+        elif is_images_to_pdf:
+            has_images = bool(self.image_files)
+            self.convert_button.disabled = not has_images
+            self._set_status_banner(
+                None if has_images else "Click 'Select Images' to choose one or more image files to combine into a PDF.",
+                "info",
+            )
+        elif not self.current_file or not os.path.exists(self.current_file):
+            self.convert_button.disabled = True
+            self._set_status_banner(
+                "Select a document above (Ctrl+O) to run this conversion.",
+                "info",
+            )
+        else:
+            self.convert_button.disabled = False
+            self._set_status_banner(None)
+
+        if update_page:
+            try:
+                if self.page:
+                    self.page.update()
+            except Exception:
+                pass
+
+    def _on_conversion_change(self, e):
+        """Handle conversion dropdown selection in Flet 1.x."""
+        self._sync_conversion_state(update_page=True)
     
     def build_ui(self):
         """Build the conversion UI."""
@@ -79,6 +222,7 @@ class PDFConverter:
             options=[ft.dropdown.Option(conv_type) for conv_type in self.conversion_types.keys()],
             width=400,
             autofocus=True,
+            on_select=self._on_conversion_change,
         )
 
         self.image_dpi = ft.Dropdown(
@@ -114,8 +258,9 @@ class PDFConverter:
             icon=ft.Icons.PHOTO_LIBRARY,
             action=ft.PickFiles(
                 self.multiple_file_picker,
+                dialog_title="Select Images — PDF-Ops",
                 file_type=ft.FilePickerFileType.CUSTOM,
-                allowed_extensions=["jpg", "jpeg", "png"],
+                allowed_extensions=["jpg", "jpeg", "png", "webp"],
                 allow_multiple=True,
             ),
             visible=False,
@@ -126,22 +271,16 @@ class PDFConverter:
             "No files selected",
             visible=False,
         )
-        
-        # Listen for changes in the dropdown
-        def on_conversion_change(e):
-            if self.conversion_dropdown.value == "Images to PDF":
-                self.select_images_button.visible = True
-                self.convert_button.disabled = True  # Disable until images are selected
-            else:
-                self.select_images_button.visible = False
-                self.convert_button.disabled = False
-                self.selected_files_text.visible = False
-            is_pdf_to_images = self.conversion_dropdown.value == "PDF to Images"
-            self.image_dpi.visible = is_pdf_to_images
-            self.image_format.visible = is_pdf_to_images
-            self.page.update()
-        
-        self.conversion_dropdown.on_change = on_conversion_change
+
+        # Inline capability / warning notice
+        self.status_banner = ft.Container(
+            visible=False,
+            padding=10,
+            border_radius=8,
+            width=520,
+        )
+
+        self._sync_conversion_state(update_page=False)
         
         # Main container
         return ft.Container(
@@ -156,6 +295,7 @@ class PDFConverter:
                 ),
                 ft.Divider(),
                 self.conversion_dropdown,
+                self.status_banner,
                 ft.Row([self.image_dpi, self.image_format]),
                 self.select_images_button,
                 self.selected_files_text,
@@ -163,7 +303,7 @@ class PDFConverter:
                 self.convert_button,
                 ft.Container(
                     content=ft.Text(
-                        "📝 Note: PDF to Excel/PowerPoint conversion works best with simple layouts",
+                        "📝 Note: PDF to Excel works best with structured tables; Office-to-PDF uses local LibreOffice.",
                         theme_style=ft.TextThemeStyle.BODY_SMALL,
                         italic=True,
                     ),
@@ -176,11 +316,8 @@ class PDFConverter:
     def on_multiple_files_selected(self, e):
         """Handle multiple file selection for image to PDF conversion."""
         if e.files:
-            self.image_files = [f.path for f in e.files]
-            self.selected_files_text.value = f"Selected {len(self.image_files)} images"
-            self.selected_files_text.visible = True
-            self.convert_button.disabled = False
-            self.page.update()
+            self.image_files = [f.path for f in e.files if f.path]
+            self._sync_conversion_state(update_page=True)
         
     def start_conversion(self, e):
         """Start the conversion process in a separate thread."""
@@ -220,7 +357,9 @@ class PDFConverter:
 
     def set_current_file(self, file_path):
         """Receive the active file selection from the application shell."""
-        self.current_file = file_path
+        self.current_file = file_path or None
+        self.image_files = []
+        self._sync_conversion_state(update_page=True)
         
     def pdf_to_word(self):
         """Convert PDF to Word document."""
