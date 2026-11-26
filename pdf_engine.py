@@ -7,6 +7,11 @@ all files on the local machine and raise useful exceptions for the UI to show.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
+import hashlib
+import io
+import json
+import math
 import os
 from pathlib import Path
 import re
@@ -17,7 +22,7 @@ from collections.abc import Callable
 
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import pymupdf as fitz
 
 
@@ -1324,6 +1329,853 @@ def render_redaction_page_preview(
             "scale": float(scale),
             "page_count": doc.page_count,
         }
+
+
+# =============================================================================
+# Phase 7: Digital Signatures & Stamp Studio Engine
+# =============================================================================
+
+STAMP_PRESETS: tuple[str, ...] = (
+    "APPROVED",
+    "CONFIDENTIAL",
+    "DRAFT",
+    "FINAL",
+    "PAID",
+    "REJECTED",
+)
+
+STAMP_COLORS: dict[str, tuple[str, str, tuple[int, int, int]]] = {
+    "red": ("Classic Red", "#DC2626", (220, 38, 38)),
+    "navy": ("Navy Blue", "#1E3A8A", (30, 58, 138)),
+    "green": ("Forest Green", "#15803D", (21, 128, 61)),
+    "slate": ("Charcoal Slate", "#334155", (51, 65, 85)),
+}
+
+STAMP_BORDER_STYLES: dict[str, str] = {
+    "double": "Double Box",
+    "solid": "Solid Frame",
+    "rounded": "Rounded Badge",
+    "dashed": "Dashed Seal",
+}
+
+SIGNATURE_INK_COLORS: dict[str, tuple[str, str, tuple[int, int, int]]] = {
+    "black": ("Midnight Black", "#0F172A", (15, 23, 42)),
+    "blue": ("Classic Blue", "#1D4ED8", (29, 78, 216)),
+    "navy": ("Deep Navy", "#1E3A8A", (30, 58, 138)),
+    "crimson": ("Crimson Ink", "#B91C1C", (185, 28, 28)),
+}
+
+_SIGNATURE_FONT_DEFINITIONS: list[dict] = [
+    {
+        "id": "chancery",
+        "label": "Chancery Script",
+        "description": "Flowing calligraphic chancery script",
+        "fitz_fallback": "tiit",
+        "candidates": [
+            "/usr/share/fonts/opentype/urw-base35/Z003-MediumItalic.otf",
+            "/usr/share/fonts/truetype/urw-base35/Z003-MediumItalic.ttf",
+            "C:/Windows/Fonts/SCRIPTBL.TTF",
+            "C:/Windows/Fonts/BRUSHSCI.TTF",
+            "/System/Library/Fonts/Supplemental/SnellRoundhand.ttc",
+            "/System/Library/Fonts/Supplemental/Zapfino.ttf",
+        ],
+    },
+    {
+        "id": "calligraphic",
+        "label": "Calligraphic",
+        "description": "Formal artistic pen calligraphy",
+        "fitz_fallback": "tiit",
+        "candidates": [
+            "/usr/share/fonts/opentype/mathjax/MathJax_Caligraphic-Regular.otf",
+            "/usr/share/fonts/opentype/urw-base35/URWBookman-DemiItalic.otf",
+            "C:/Windows/Fonts/LHANDW.TTF",
+            "C:/Windows/Fonts/ITCEDSCR.TTF",
+            "/System/Library/Fonts/Supplemental/Apple Chancery.ttf",
+        ],
+    },
+    {
+        "id": "script",
+        "label": "Editorial Script",
+        "description": "Clean cursive manuscript lettering",
+        "fitz_fallback": "tiit",
+        "candidates": [
+            "/usr/share/fonts/opentype/mathjax/MathJax_Script-Regular.otf",
+            "/usr/share/fonts/opentype/urw-base35/C059-Italic.otf",
+            "C:/Windows/Fonts/FREESCPT.TTF",
+            "C:/Windows/Fonts/KUNSTLER.TTF",
+            "/System/Library/Fonts/Supplemental/Brush Script.ttf",
+        ],
+    },
+    {
+        "id": "serif_italic",
+        "label": "Classic Serif Italic",
+        "description": "Executive italic serif signature",
+        "fitz_fallback": "tibi",
+        "candidates": [
+            "/usr/share/fonts/opentype/urw-base35/P052-Italic.otf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Italic.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSerif-Italic.ttf",
+            "C:/Windows/Fonts/georgiai.ttf",
+            "C:/Windows/Fonts/timesi.ttf",
+            "/System/Library/Fonts/Supplemental/Georgia Italic.ttf",
+        ],
+    },
+]
+
+_STAMP_BOLD_FONT_CANDIDATES: tuple[str, ...] = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "/usr/share/fonts/opentype/urw-base35/NimbusSans-Bold.otf",
+    "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+    "C:/Windows/Fonts/arialbd.ttf",
+    "C:/Windows/Fonts/calibrib.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+)
+
+
+@dataclass
+class PlacementItem:
+    """Normalized signature or stamp overlay placed on a specific PDF page."""
+
+    id: str
+    page_index: int
+    nx: float
+    ny: float
+    nw: float
+    nh: float
+    png_bytes: bytes
+    label: str = "Signature"
+    kind: str = "signature"  # "signature" | "initials" | "stamp"
+    opacity: float = 1.0
+    rotation: float = 0.0
+
+
+def _parse_rgb_color(color: str | tuple[int, int, int]) -> tuple[int, int, int]:
+    """Normalize a hex color string or RGB tuple into (r, g, b) ints."""
+    if isinstance(color, tuple) and len(color) >= 3:
+        return (int(color[0]), int(color[1]), int(color[2]))
+    if isinstance(color, str):
+        key = color.strip().lower()
+        if key in SIGNATURE_INK_COLORS:
+            return SIGNATURE_INK_COLORS[key][2]
+        if key in STAMP_COLORS:
+            return STAMP_COLORS[key][2]
+        cleaned = key.lstrip("#")
+        if len(cleaned) == 6:
+            return (
+                int(cleaned[0:2], 16),
+                int(cleaned[2:4], 16),
+                int(cleaned[4:6], 16),
+            )
+    return (15, 23, 42)
+
+
+def _find_first_existing_font(candidates: tuple[str, ...] | list[str]) -> str | None:
+    for path in candidates:
+        if path and os.path.exists(path):
+            return path
+    return None
+
+
+def compute_quadratic_bezier_segments(
+    points: list[tuple[float, float]],
+) -> tuple[tuple[float, float] | None, list[tuple[float, float, float, float]]]:
+    """Convert raw pointer samples into midpoint quadratic Bezier segments.
+
+    Returns ``(start_point, [(cp_x, cp_y, end_x, end_y), ...])``.
+    For a 2-point stroke, the control point is the midpoint so the curve is linear.
+    """
+    if not points:
+        return None, []
+    start = (float(points[0][0]), float(points[0][1]))
+    if len(points) == 1:
+        return start, []
+    if len(points) == 2:
+        p1 = (float(points[1][0]), float(points[1][1]))
+        cx = (start[0] + p1[0]) / 2.0
+        cy = (start[1] + p1[1]) / 2.0
+        return start, [(cx, cy, p1[0], p1[1])]
+
+    segments: list[tuple[float, float, float, float]] = []
+    for idx in range(1, len(points) - 1):
+        px, py = float(points[idx][0]), float(points[idx][1])
+        nx, ny = float(points[idx + 1][0]), float(points[idx + 1][1])
+        mid_x = (px + nx) / 2.0
+        mid_y = (py + ny) / 2.0
+        segments.append((px, py, mid_x, mid_y))
+
+    last_x, last_y = float(points[-1][0]), float(points[-1][1])
+    prev_x, prev_y = float(points[-2][0]), float(points[-2][1])
+    segments.append(((prev_x + last_x) / 2.0, (prev_y + last_y) / 2.0, last_x, last_y))
+    return start, segments
+
+
+def _evaluate_quadratic_bezier(
+    p0: tuple[float, float],
+    cp: tuple[float, float],
+    p1: tuple[float, float],
+    steps: int = 12,
+) -> list[tuple[float, float]]:
+    pts: list[tuple[float, float]] = []
+    for i in range(steps + 1):
+        t = i / steps
+        inv = 1.0 - t
+        x = inv * inv * p0[0] + 2.0 * inv * t * cp[0] + t * t * p1[0]
+        y = inv * inv * p0[1] + 2.0 * inv * t * cp[1] + t * t * p1[1]
+        pts.append((x, y))
+    return pts
+
+
+def _crop_transparent_png(img: Image.Image, padding: int = 12) -> bytes:
+    """Tightly crop an RGBA image to non-transparent bounds with padding and return PNG bytes."""
+    rgba = img.convert("RGBA")
+    bbox = rgba.getbbox()
+    if bbox is None:
+        raise ValueError("Rendered graphic contains no visible pixels.")
+    left = max(0, bbox[0] - padding)
+    top = max(0, bbox[1] - padding)
+    right = min(rgba.width, bbox[2] + padding)
+    bottom = min(rgba.height, bbox[3] + padding)
+    cropped = rgba.crop((left, top, right, bottom))
+    buf = io.BytesIO()
+    cropped.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def render_drawn_signature_png(
+    strokes: list[list[tuple[float, float]]],
+    canvas_width: float = 520.0,
+    canvas_height: float = 180.0,
+    stroke_width: float = 3.5,
+    ink_color: str | tuple[int, int, int] = "#0F172A",
+    padding: int = 16,
+    scale: int = 2,
+) -> bytes:
+    """Rasterize smoothed quadratic-Bezier signature strokes into a transparent PNG."""
+    valid_strokes = [s for s in strokes if s]
+    if not valid_strokes:
+        raise ValueError("Signature pad is empty. Draw your signature first.")
+
+    r, g, b = _parse_rgb_color(ink_color)
+    rgba_ink = (r, g, b, 255)
+    w = max(int(math.ceil(canvas_width * scale)), 32)
+    h = max(int(math.ceil(canvas_height * scale)), 32)
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    scaled_width = max(int(round(stroke_width * scale)), 2)
+    radius = scaled_width / 2.0
+
+    for raw_stroke in valid_strokes:
+        scaled_pts = [(float(x) * scale, float(y) * scale) for x, y in raw_stroke]
+        start, segments = compute_quadratic_bezier_segments(scaled_pts)
+        if start is None:
+            continue
+        if not segments:
+            draw.ellipse(
+                [start[0] - radius, start[1] - radius, start[0] + radius, start[1] + radius],
+                fill=rgba_ink,
+            )
+            continue
+
+        dense_pts: list[tuple[float, float]] = [start]
+        cur = start
+        for cpx, cpy, ex, ey in segments:
+            seg_pts = _evaluate_quadratic_bezier(cur, (cpx, cpy), (ex, ey), steps=10)
+            dense_pts.extend(seg_pts[1:])
+            cur = (ex, ey)
+
+        draw.line(dense_pts, fill=rgba_ink, width=scaled_width, joint="curve")
+        for pt in (dense_pts[0], dense_pts[-1]):
+            draw.ellipse(
+                [pt[0] - radius, pt[1] - radius, pt[0] + radius, pt[1] + radius],
+                fill=rgba_ink,
+            )
+
+    return _crop_transparent_png(img, padding=padding)
+
+
+def remove_signature_background(
+    source: str | Path | bytes,
+    threshold: int = 220,
+    feather: int = 28,
+    ink_tint: tuple[int, int, int] | None = None,
+) -> bytes:
+    """Remove bright/white paper backgrounds from an uploaded signature image via PIL/NumPy."""
+    if isinstance(source, (str, Path)):
+        src_path = Path(source)
+        if not src_path.exists():
+            raise FileNotFoundError(f"Signature image '{source}' not found.")
+        img = Image.open(str(src_path)).convert("RGBA")
+    elif isinstance(source, (bytes, bytearray)):
+        img = Image.open(io.BytesIO(bytes(source))).convert("RGBA")
+    else:
+        raise TypeError("source must be a file path or image bytes")
+
+    arr = np.array(img, dtype=np.float32)
+    rgb = arr[:, :, :3]
+    alpha = arr[:, :, 3]
+
+    # Perceived luminance + low-chroma check preserves colored ink while erasing paper
+    lum = 0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]
+    chroma = np.max(rgb, axis=2) - np.min(rgb, axis=2)
+    is_paper_hue = chroma <= 55.0
+
+    thresh = float(max(100, min(254, threshold)))
+    feath = float(max(1, feather))
+    low = thresh - feath
+
+    # Fully transparent above threshold; smooth linear ramp in [low, thresh]
+    factor = np.ones_like(lum, dtype=np.float32)
+    ramp_mask = is_paper_hue & (lum >= low) & (lum < thresh)
+    factor[ramp_mask] = (thresh - lum[ramp_mask]) / feath
+    factor[is_paper_hue & (lum >= thresh)] = 0.0
+
+    new_alpha = np.clip(alpha * factor, 0.0, 255.0)
+    arr[:, :, 3] = new_alpha
+
+    if ink_tint is not None:
+        ink_mask = new_alpha > 8.0
+        arr[ink_mask, 0] = float(ink_tint[0])
+        arr[ink_mask, 1] = float(ink_tint[1])
+        arr[ink_mask, 2] = float(ink_tint[2])
+
+    cleaned = Image.fromarray(arr.astype(np.uint8), mode="RGBA")
+    return _crop_transparent_png(cleaned, padding=10)
+
+
+def get_available_signature_fonts() -> list[dict[str, str]]:
+    """Return cursive/script typography presets with resolved local font paths when available."""
+    results: list[dict[str, str]] = []
+    for entry in _SIGNATURE_FONT_DEFINITIONS:
+        resolved = _find_first_existing_font(entry["candidates"]) or ""
+        results.append(
+            {
+                "id": entry["id"],
+                "label": entry["label"],
+                "description": entry["description"],
+                "font_path": resolved,
+            }
+        )
+    return results
+
+
+def render_typed_signature_png(
+    text: str,
+    font_style: str = "chancery",
+    ink_color: str | tuple[int, int, int] = "#0F172A",
+    font_size: int = 92,
+) -> bytes:
+    """Render a typed name into a transparent cursive signature PNG."""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        raise ValueError("Please enter your name to generate a typed signature.")
+
+    r, g, b = _parse_rgb_color(ink_color)
+    profile = next((f for f in _SIGNATURE_FONT_DEFINITIONS if f["id"] == font_style), _SIGNATURE_FONT_DEFINITIONS[0])
+    font_path = _find_first_existing_font(profile["candidates"])
+
+    if font_path:
+        font = ImageFont.truetype(font_path, font_size)
+        probe = Image.new("RGBA", (10, 10), (0, 0, 0, 0))
+        probe_draw = ImageDraw.Draw(probe)
+        bbox = probe_draw.textbbox((0, 0), cleaned, font=font)
+        tw = max(bbox[2] - bbox[0], 20)
+        th = max(bbox[3] - bbox[1], 20)
+        pad = 24
+        canvas = Image.new("RGBA", (tw + pad * 2, th + pad * 2), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(canvas)
+        draw.text((pad - bbox[0], pad - bbox[1]), cleaned, font=font, fill=(r, g, b, 255))
+        return _crop_transparent_png(canvas, padding=10)
+
+    # Portable PyMuPDF built-in italic serif fallback if no OS cursive font exists
+    with fitz.open() as tmp_doc:
+        width_pt = max(len(cleaned) * font_size * 0.72 + 80.0, 240.0)
+        height_pt = float(font_size * 2.0)
+        page = tmp_doc.new_page(width=width_pt, height=height_pt)
+        page.insert_text(
+            fitz.Point(28.0, font_size * 1.25),
+            cleaned,
+            fontname=profile.get("fitz_fallback", "tiit"),
+            fontsize=float(font_size),
+            color=(r / 255.0, g / 255.0, b / 255.0),
+        )
+        pix = page.get_pixmap(alpha=True)
+        img = Image.frombytes("RGBA", [pix.width, pix.height], pix.samples)
+        return _crop_transparent_png(img, padding=10)
+
+
+def _load_stamp_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    font_path = _find_first_existing_font(_STAMP_BOLD_FONT_CANDIDATES)
+    if font_path:
+        return ImageFont.truetype(font_path, size)
+    return ImageFont.load_default()
+
+
+def render_stamp_image(
+    text: str = "APPROVED",
+    color_key: str = "red",
+    border_style: str = "double",
+    include_date: bool = True,
+    include_time: bool = False,
+    operator_name: str = "",
+    custom_subtext: str = "",
+    rotation: float = -12.0,
+    opacity: float = 0.92,
+    timestamp: datetime | None = None,
+) -> bytes:
+    """Render an official customizable rubber stamp to high-resolution transparent PNG bytes."""
+    main_text = (text or "").strip().upper()
+    if not main_text:
+        raise ValueError("Stamp text cannot be empty.")
+
+    r, g, b = _parse_rgb_color(color_key)
+    op = max(0.15, min(1.0, float(opacity)))
+    alpha_full = int(round(255 * op))
+    ink = (r, g, b, alpha_full)
+    tint_bg = (r, g, b, int(round(22 * op)))
+
+    now = timestamp or datetime.now()
+    meta_parts: list[str] = []
+    if include_date:
+        meta_parts.append(now.strftime("%Y-%m-%d"))
+    if include_time:
+        meta_parts.append(now.strftime("%H:%M"))
+    if operator_name.strip():
+        meta_parts.append(operator_name.strip().upper())
+
+    sub_lines: list[str] = []
+    if custom_subtext.strip():
+        sub_lines.append(custom_subtext.strip().upper())
+    if meta_parts:
+        sub_lines.append(" • ".join(meta_parts))
+
+    main_font = _load_stamp_font(44)
+    sub_font = _load_stamp_font(17)
+
+    probe = Image.new("RGBA", (10, 10), (0, 0, 0, 0))
+    pdraw = ImageDraw.Draw(probe)
+    main_bbox = pdraw.textbbox((0, 0), main_text, font=main_font)
+    main_w = main_bbox[2] - main_bbox[0]
+    main_h = main_bbox[3] - main_bbox[1]
+
+    sub_bboxes = [pdraw.textbbox((0, 0), line, font=sub_font) for line in sub_lines]
+    sub_widths = [bb[2] - bb[0] for bb in sub_bboxes]
+    sub_heights = [bb[3] - bb[1] for bb in sub_bboxes]
+
+    content_w = max([main_w, *sub_widths, 180])
+    pad_x = 34
+    pad_y = 22
+    line_gap = 10
+    total_sub_h = sum(sub_heights) + (line_gap * len(sub_lines))
+    divider_space = 14 if sub_lines else 0
+
+    box_w = content_w + pad_x * 2
+    box_h = main_h + total_sub_h + divider_space + pad_y * 2
+
+    margin = 16
+    canvas = Image.new("RGBA", (box_w + margin * 2, box_h + margin * 2), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(canvas)
+
+    x0, y0 = margin, margin
+    x1, y1 = margin + box_w, margin + box_h
+
+    style_key = border_style.lower().strip()
+    if style_key == "rounded":
+        draw.rounded_rectangle([x0, y0, x1, y1], radius=18, fill=tint_bg, outline=ink, width=5)
+        draw.rounded_rectangle([x0 + 7, y0 + 7, x1 - 7, y1 - 7], radius=12, outline=ink, width=2)
+    elif style_key == "solid":
+        draw.rectangle([x0, y0, x1, y1], fill=tint_bg, outline=ink, width=6)
+    elif style_key == "dashed":
+        draw.rectangle([x0, y0, x1, y1], fill=tint_bg)
+        dash = 14
+        gap = 8
+        for sx in range(x0, x1, dash + gap):
+            draw.line([(sx, y0), (min(sx + dash, x1), y0)], fill=ink, width=5)
+            draw.line([(sx, y1), (min(sx + dash, x1), y1)], fill=ink, width=5)
+        for sy in range(y0, y1, dash + gap):
+            draw.line([(x0, sy), (x0, min(sy + dash, y1))], fill=ink, width=5)
+            draw.line([(x1, sy), (x1, min(sy + dash, y1))], fill=ink, width=5)
+    else:  # "double" default
+        draw.rectangle([x0, y0, x1, y1], fill=tint_bg, outline=ink, width=5)
+        draw.rectangle([x0 + 8, y0 + 8, x1 - 8, y1 - 8], outline=ink, width=2)
+
+    cur_y = y0 + pad_y
+    main_x = x0 + (box_w - main_w) // 2 - main_bbox[0]
+    draw.text((main_x, cur_y - main_bbox[1]), main_text, font=main_font, fill=ink)
+    cur_y += main_h
+
+    if sub_lines:
+        cur_y += 8
+        draw.line([(x0 + 20, cur_y), (x1 - 20, cur_y)], fill=ink, width=2)
+        cur_y += 6
+        for line, bb, lw, lh in zip(sub_lines, sub_bboxes, sub_widths, sub_heights):
+            cur_y += line_gap // 2
+            lx = x0 + (box_w - lw) // 2 - bb[0]
+            draw.text((lx, cur_y - bb[1]), line, font=sub_font, fill=ink)
+            cur_y += lh + line_gap // 2
+
+    if abs(float(rotation)) > 0.05:
+        canvas = canvas.rotate(-float(rotation), resample=Image.Resampling.BICUBIC, expand=True)
+
+    return _crop_transparent_png(canvas, padding=8)
+
+
+def get_signature_vault_dir(vault_dir: str | Path | None = None) -> Path:
+    """Return and ensure the local directory storing saved signatures."""
+    target = Path(vault_dir) if vault_dir else (Path.home() / "Documents" / "PDF-OPS" / ".signature_vault")
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def save_signature_to_vault(
+    png_bytes: bytes,
+    name: str,
+    kind: str = "drawn",
+    vault_dir: str | Path | None = None,
+) -> dict:
+    """Persist a signature PNG and metadata entry into the local signature vault."""
+    if not png_bytes:
+        raise ValueError("Cannot save an empty signature to the vault.")
+    with Image.open(io.BytesIO(png_bytes)) as verified_img:
+        verified_img.verify()
+
+    vdir = get_signature_vault_dir(vault_dir)
+    index_path = vdir / "vault_index.json"
+    entries: list[dict] = []
+    if index_path.exists():
+        try:
+            entries = json.loads(index_path.read_text(encoding="utf-8"))
+        except Exception:
+            entries = []
+
+    sig_id = str(uuid.uuid4())[:10]
+    png_path = vdir / f"sig_{sig_id}.png"
+    png_path.write_bytes(png_bytes)
+
+    entry = {
+        "id": sig_id,
+        "name": (name or "").strip() or f"Signature {len(entries) + 1}",
+        "kind": kind,
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "filename": png_path.name,
+    }
+    entries.insert(0, entry)
+    index_path.write_text(json.dumps(entries, indent=2), encoding="utf-8")
+
+    return {**entry, "png_path": str(png_path)}
+
+
+def list_vault_signatures(vault_dir: str | Path | None = None) -> list[dict]:
+    """List saved signatures available in the local signature vault."""
+    vdir = get_signature_vault_dir(vault_dir)
+    index_path = vdir / "vault_index.json"
+    if not index_path.exists():
+        return []
+    try:
+        entries = json.loads(index_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+    valid_entries: list[dict] = []
+    for item in entries:
+        png_path = vdir / str(item.get("filename", ""))
+        if png_path.exists():
+            valid_entries.append({**item, "png_path": str(png_path)})
+    return valid_entries
+
+
+def load_vault_signature_bytes(sig_id: str, vault_dir: str | Path | None = None) -> bytes:
+    """Load raw PNG bytes for a signature stored in the local vault."""
+    for entry in list_vault_signatures(vault_dir):
+        if entry["id"] == sig_id:
+            return Path(entry["png_path"]).read_bytes()
+    raise FileNotFoundError(f"Vault signature '{sig_id}' was not found.")
+
+
+def delete_vault_signature(sig_id: str, vault_dir: str | Path | None = None) -> bool:
+    """Delete a signature from the local vault index and disk."""
+    vdir = get_signature_vault_dir(vault_dir)
+    index_path = vdir / "vault_index.json"
+    if not index_path.exists():
+        return False
+    try:
+        entries = json.loads(index_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+
+    kept: list[dict] = []
+    removed = False
+    for item in entries:
+        if item.get("id") == sig_id:
+            removed = True
+            png_path = vdir / str(item.get("filename", ""))
+            if png_path.exists():
+                png_path.unlink(missing_ok=True)
+        else:
+            kept.append(item)
+
+    if removed:
+        index_path.write_text(json.dumps(kept, indent=2), encoding="utf-8")
+    return removed
+
+
+def build_multipage_placements(
+    page_count: int,
+    mode: str,
+    primary_png: bytes,
+    secondary_png: bytes | None = None,
+    primary_rect: tuple[float, float, float, float] = (0.68, 0.84, 0.24, 0.09),
+    secondary_rect: tuple[float, float, float, float] = (0.78, 0.88, 0.14, 0.06),
+    page_range: str = "",
+    primary_label: str = "Signature",
+    secondary_label: str = "Initials",
+    kind: str = "signature",
+    opacity: float = 1.0,
+) -> list[PlacementItem]:
+    """Generate normalized multi-page placements for common contract signing workflows."""
+    if page_count < 1:
+        raise ValueError("Document has no pages.")
+    if not primary_png:
+        raise ValueError("Primary signature or stamp image is required.")
+
+    norm_mode = mode.strip().lower()
+    items: list[PlacementItem] = []
+
+    def _clamp_box(rect: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+        nx = max(0.0, min(0.95, float(rect[0])))
+        ny = max(0.0, min(0.95, float(rect[1])))
+        nw = max(0.04, min(1.0 - nx, float(rect[2])))
+        nh = max(0.03, min(1.0 - ny, float(rect[3])))
+        return nx, ny, nw, nh
+
+    pnx, pny, pnw, pnh = _clamp_box(primary_rect)
+    snx, sny, snw, snh = _clamp_box(secondary_rect)
+
+    if norm_mode == "all_pages":
+        for p_idx in range(page_count):
+            items.append(
+                PlacementItem(
+                    id=str(uuid.uuid4())[:8],
+                    page_index=p_idx,
+                    nx=pnx,
+                    ny=pny,
+                    nw=pnw,
+                    nh=pnh,
+                    png_bytes=primary_png,
+                    label=primary_label,
+                    kind=kind,
+                    opacity=opacity,
+                )
+            )
+    elif norm_mode == "final_page":
+        items.append(
+            PlacementItem(
+                id=str(uuid.uuid4())[:8],
+                page_index=page_count - 1,
+                nx=pnx,
+                ny=pny,
+                nw=pnw,
+                nh=pnh,
+                png_bytes=primary_png,
+                label=primary_label,
+                kind=kind,
+                opacity=opacity,
+            )
+        )
+    elif norm_mode == "initial_all_sign_last":
+        init_png = secondary_png or primary_png
+        for p_idx in range(page_count - 1):
+            items.append(
+                PlacementItem(
+                    id=str(uuid.uuid4())[:8],
+                    page_index=p_idx,
+                    nx=snx,
+                    ny=sny,
+                    nw=snw,
+                    nh=snh,
+                    png_bytes=init_png,
+                    label=secondary_label,
+                    kind="initials",
+                    opacity=opacity,
+                )
+            )
+        items.append(
+            PlacementItem(
+                id=str(uuid.uuid4())[:8],
+                page_index=page_count - 1,
+                nx=pnx,
+                ny=pny,
+                nw=pnw,
+                nh=pnh,
+                png_bytes=primary_png,
+                label=primary_label,
+                kind=kind,
+                opacity=opacity,
+            )
+        )
+    elif norm_mode == "custom_range":
+        target_pages = [p - 1 for p in dict.fromkeys(parse_page_ranges(page_range, page_count))]
+        for p_idx in target_pages:
+            items.append(
+                PlacementItem(
+                    id=str(uuid.uuid4())[:8],
+                    page_index=p_idx,
+                    nx=pnx,
+                    ny=pny,
+                    nw=pnw,
+                    nh=pnh,
+                    png_bytes=primary_png,
+                    label=primary_label,
+                    kind=kind,
+                    opacity=opacity,
+                )
+            )
+    else:
+        raise ValueError(f"Unsupported multi-page mode '{mode}'.")
+
+    return items
+
+
+def _apply_opacity_and_rotation(
+    png_bytes: bytes,
+    opacity: float = 1.0,
+    rotation: float = 0.0,
+) -> bytes:
+    """Apply overlay opacity and rotation cleanly to an RGBA PNG buffer."""
+    op = max(0.05, min(1.0, float(opacity)))
+    if op >= 0.999 and abs(float(rotation)) <= 0.05:
+        return png_bytes
+
+    with Image.open(io.BytesIO(png_bytes)) as img:
+        rgba = img.convert("RGBA")
+        if op < 0.999:
+            arr = np.array(rgba, dtype=np.float32)
+            arr[:, :, 3] = np.clip(arr[:, :, 3] * op, 0.0, 255.0)
+            rgba = Image.fromarray(arr.astype(np.uint8), mode="RGBA")
+        if abs(float(rotation)) > 0.05:
+            rgba = rgba.rotate(-float(rotation), resample=Image.Resampling.BICUBIC, expand=True)
+        buf = io.BytesIO()
+        rgba.save(buf, format="PNG")
+        return buf.getvalue()
+
+
+def _compute_file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while chunk := fh.read(65536):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_signed_pdf_integrity(pdf_path: str | Path) -> dict:
+    """Compute a local SHA-256 integrity fingerprint and summarize embedded visual graphics."""
+    target = Path(pdf_path)
+    if not target.exists():
+        raise FileNotFoundError(f"PDF file '{pdf_path}' not found.")
+
+    sha256 = _compute_file_sha256(target)
+    with fitz.open(str(target)) as doc:
+        image_count = sum(len(page.get_images(full=True)) for page in doc)
+        return {
+            "path": str(target),
+            "sha256": sha256,
+            "page_count": doc.page_count,
+            "embedded_image_count": image_count,
+            "is_encrypted": bool(doc.is_encrypted),
+        }
+
+
+def apply_signatures_and_stamps(
+    source: str | Path,
+    output_path: str | Path,
+    placements: list[PlacementItem | dict],
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> dict:
+    """Embed signature and stamp PNG overlays onto exact normalized PDF coordinates."""
+    source_path = Path(source)
+    if not source_path.exists():
+        raise FileNotFoundError(f"Source file '{source}' not found.")
+
+    normalized_items: list[PlacementItem] = []
+    for raw in placements:
+        if isinstance(raw, PlacementItem):
+            normalized_items.append(raw)
+        elif isinstance(raw, dict):
+            normalized_items.append(
+                PlacementItem(
+                    id=str(raw.get("id", str(uuid.uuid4())[:8])),
+                    page_index=int(raw["page_index"]),
+                    nx=float(raw["nx"]),
+                    ny=float(raw["ny"]),
+                    nw=float(raw["nw"]),
+                    nh=float(raw["nh"]),
+                    png_bytes=bytes(raw["png_bytes"]),
+                    label=str(raw.get("label", "Signature")),
+                    kind=str(raw.get("kind", "signature")),
+                    opacity=float(raw.get("opacity", 1.0)),
+                    rotation=float(raw.get("rotation", 0.0)),
+                )
+            )
+
+    if not normalized_items:
+        raise ValueError("No signature or stamp placements were provided.")
+
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    sha_before = _compute_file_sha256(source_path)
+
+    by_page: dict[int, list[PlacementItem]] = {}
+    for item in normalized_items:
+        by_page.setdefault(item.page_index, []).append(item)
+
+    with fitz.open(str(source_path)) as doc:
+        if doc.is_encrypted and doc.needs_pass:
+            raise ValueError(f"Document '{source_path.name}' is password protected. Decrypt it before signing.")
+
+        total_pages = max(len(by_page), 1)
+        placements_applied = 0
+
+        for step, (page_idx, page_items) in enumerate(sorted(by_page.items()), start=1):
+            if page_idx < 0 or page_idx >= doc.page_count:
+                raise IndexError(f"Page index {page_idx} out of range (0..{doc.page_count - 1})")
+
+            if progress_callback:
+                progress_callback(step, total_pages, f"Embedding signatures & stamps on page {page_idx + 1}...")
+
+            page = doc[page_idx]
+            page_rect = page.rect
+            pw, ph = float(page_rect.width), float(page_rect.height)
+
+            for item in page_items:
+                x0 = max(0.0, min(item.nx, 0.99)) * pw
+                y0 = max(0.0, min(item.ny, 0.99)) * ph
+                x1 = min(pw, x0 + max(0.02, item.nw) * pw)
+                y1 = min(ph, y0 + max(0.02, item.nh) * ph)
+                target_rect = fitz.Rect(x0, y0, max(x0 + 4.0, x1), max(y0 + 4.0, y1))
+
+                final_png = _apply_opacity_and_rotation(
+                    item.png_bytes,
+                    opacity=item.opacity,
+                    rotation=item.rotation,
+                )
+                page.insert_image(
+                    target_rect,
+                    stream=final_png,
+                    keep_proportion=True,
+                    overlay=True,
+                )
+                placements_applied += 1
+
+        doc.save(str(out), garbage=3, deflate=True)
+
+    sha_after = _compute_file_sha256(out)
+    return {
+        "output_path": str(out),
+        "pages_signed": len(by_page),
+        "placements_applied": placements_applied,
+        "sha256_before": sha_before,
+        "sha256_after": sha_after,
+    }
 
 
 

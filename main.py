@@ -23,6 +23,7 @@ from ui_ocr import OfflineOCRView
 from ui_organizer import PageOrganizerView
 from ui_quick_actions import QuickActionsView
 from ui_redaction import RedactionSanitizerView
+from ui_signatures import SignatureStampView
 from ui_stubs import OfflineOCRPreview
 from utils import get_output_dir, open_folder, show_snackbar
 
@@ -52,6 +53,7 @@ class PDFOpsApp:
             ("organizer", "Page Manager", ft.Icons.GRID_VIEW, "Visual page reorder, rotate & extract"),
             ("ocr", "Offline OCR", ft.Icons.DOCUMENT_SCANNER, "100% on-device text recognition"),
             ("redaction", "Redact & Sanitize", ft.Icons.PRIVACY_TIP, "Permanent redaction & metadata purge"),
+            ("signatures", "Sign & Stamp", ft.Icons.HISTORY_EDU, "Digital signatures & rubber stamps"),
         ]
 
     def main(self, page: ft.Page):
@@ -123,6 +125,14 @@ class PDFOpsApp:
             progress_text=self.progress_text,
             is_dark_supplier=lambda: self.is_dark_theme,
         )
+        self.signatures_view = SignatureStampView(
+            page=page,
+            app_state=self.state,
+            output_dir=self.output_dir,
+            progress_bar=self.progress_bar,
+            progress_text=self.progress_text,
+            is_dark_supplier=lambda: self.is_dark_theme,
+        )
 
         # Contextual Inspector (Pane 3)
         self.inspector = DocumentInspector(page, lambda: self.is_dark_theme)
@@ -130,18 +140,7 @@ class PDFOpsApp:
         self.state.subscribe(self.page_organizer.set_current_file)
         self.state.subscribe(self.ocr_view.set_current_file)
         self.state.subscribe(self.redaction_view.set_current_file)
-
-        # Build Navigation Items
-        self.nav_destinations = [
-            ("quick", "Quick Actions", ft.Icons.BOLT, "1-click high-frequency workflows"),
-            ("convert", "Convert Studio", ft.Icons.SWAP_HORIZ, "Word, Images, Excel, PPT"),
-            ("edit", "Edit & Stamp", ft.Icons.EDIT_NOTE, "Watermarks, Rotations, Crops"),
-            ("merge", "Merge & Split", ft.Icons.CALL_MERGE, "Reorder, Ranges, Chapters, Compress"),
-            ("security", "Security", ft.Icons.SECURITY, "AES-256 Encryption & Permissions"),
-            ("organizer", "Page Manager", ft.Icons.GRID_VIEW, "Visual page reorder, rotate & extract"),
-            ("ocr", "Offline OCR", ft.Icons.DOCUMENT_SCANNER, "100% on-device text recognition"),
-            ("redaction", "Redact & Sanitize", ft.Icons.PRIVACY_TIP, "Permanent redaction & metadata purge"),
-        ]
+        self.state.subscribe(self.signatures_view.set_current_file)
 
         # Setup Containers
         self.nav_rail_container = ft.Container(width=220, padding=12)
@@ -413,6 +412,7 @@ class PDFOpsApp:
             "organizer": self.page_organizer.build_ui,
             "ocr": self.ocr_view.build_ui,
             "redaction": self.redaction_view.build_ui,
+            "signatures": self.signatures_view.build_ui,
         }
 
         active_builder = tool_view_map.get(self.active_tool_id, self.quick_actions.build_ui)
