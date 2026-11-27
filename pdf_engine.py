@@ -2178,4 +2178,482 @@ def apply_signatures_and_stamps(
     }
 
 
+# ---------------------------------------------------------------------------
+# Phase 8: Interactive Form Filler & Flattener (AcroForms)
+# ---------------------------------------------------------------------------
+
+
+_FORM_TYPE_MAP: dict[int, tuple[str, str]] = {
+    fitz.PDF_WIDGET_TYPE_TEXT: ("text", "Text"),
+    fitz.PDF_WIDGET_TYPE_CHECKBOX: ("checkbox", "Checkbox"),
+    fitz.PDF_WIDGET_TYPE_RADIOBUTTON: ("radio", "Radio Group"),
+    fitz.PDF_WIDGET_TYPE_COMBOBOX: ("combobox", "Dropdown"),
+    fitz.PDF_WIDGET_TYPE_LISTBOX: ("listbox", "List Box"),
+    fitz.PDF_WIDGET_TYPE_SIGNATURE: ("signature", "Signature"),
+    fitz.PDF_WIDGET_TYPE_BUTTON: ("button", "Button"),
+}
+
+_FILLABLE_FORM_TYPES = {"text", "checkbox", "radio", "combobox", "listbox"}
+
+
+@dataclass
+class FormFieldDescriptor:
+    """Structured descriptor for an AcroForm field or grouped radio control."""
+
+    key: str
+    field_name: str
+    field_label: str
+    field_type: str
+    field_type_label: str
+    page_index: int
+    norm_rect: tuple[float, float, float, float]
+    pdf_rect: tuple[float, float, float, float]
+    value: object
+    default_value: object
+    options: list[str] = field(default_factory=list)
+    option_entries: list[dict] = field(default_factory=list)
+    is_read_only: bool = False
+    is_required: bool = False
+    is_multiline: bool = False
+    is_password: bool = False
+    is_fillable: bool = True
+    xrefs: list[int] = field(default_factory=list)
+    tab_index: int = 0
+
+
+def _normalize_choice_values(raw_choices: list | None) -> list[str]:
+    """Normalize PyMuPDF choice_values entries into clean display/export strings."""
+    if not raw_choices:
+        return []
+    normalized: list[str] = []
+    for item in raw_choices:
+        if isinstance(item, (tuple, list)) and item:
+            val = str(item[0])
+        else:
+            val = str(item)
+        if val not in normalized:
+            normalized.append(val)
+    return normalized
+
+
+def _normalize_widget_rect(rect: fitz.Rect, page_rect: fitz.Rect) -> tuple[float, float, float, float]:
+    pw = max(float(page_rect.width), 1.0)
+    ph = max(float(page_rect.height), 1.0)
+    nx = max(0.0, min(1.0, float(rect.x0) / pw))
+    ny = max(0.0, min(1.0, float(rect.y0) / ph))
+    nw = max(0.005, min(1.0 - nx, float(rect.width) / pw))
+    nh = max(0.005, min(1.0 - ny, float(rect.height) / ph))
+    return (nx, ny, nw, nh)
+
+
+def _extract_radio_on_state(widget: fitz.Widget, fallback_index: int) -> str:
+    """Resolve the distinct on-state label for an individual radio widget."""
+    on_state = widget.on_state()
+    if on_state and str(on_state) not in ("Off", "None"):
+        return str(on_state)
+    try:
+        states = widget.button_states() or {}
+        for state_name in states.get("normal") or []:
+            if str(state_name) not in ("Off", "None"):
+                return str(state_name)
+    except Exception:
+        pass
+    caption = getattr(widget, "button_caption", None)
+    if caption and str(caption).strip():
+        return str(caption).strip()
+    return f"Option {fallback_index}"
+
+
+def _collect_form_fields(doc: fitz.Document) -> list[FormFieldDescriptor]:
+    """Parse all AcroForm widgets across pages into tab-ordered descriptors."""
+    descriptors: list[FormFieldDescriptor] = []
+    radio_groups: dict[str, dict] = {}
+    used_keys: set[str] = set()
+
+    for page_idx in range(doc.page_count):
+        page = doc[page_idx]
+        page_rect = page.rect
+        for widget in page.widgets():
+            raw_type = int(widget.field_type)
+            ftype, ftype_label = _FORM_TYPE_MAP.get(raw_type, ("unknown", "Unknown"))
+            raw_name = (widget.field_name or "").strip()
+            display_label = (widget.field_label or "").strip() or raw_name or f"Field {widget.xref}"
+            flags = int(getattr(widget, "field_flags", 0) or 0)
+            is_read_only = bool(flags & fitz.PDF_FIELD_IS_READ_ONLY)
+            is_required = bool(flags & fitz.PDF_FIELD_IS_REQUIRED)
+            is_multiline = bool(flags & fitz.PDF_TX_FIELD_IS_MULTILINE)
+            is_password = bool(flags & fitz.PDF_TX_FIELD_IS_PASSWORD)
+            norm_r = _normalize_widget_rect(widget.rect, page_rect)
+            pdf_r = (
+                float(widget.rect.x0),
+                float(widget.rect.y0),
+                float(widget.rect.x1),
+                float(widget.rect.y1),
+            )
+
+            if ftype == "radio":
+                group_id = raw_name or f"radio_{page_idx}_{widget.xref}"
+                group = radio_groups.get(group_id)
+                if group is None:
+                    group = {
+                        "key": group_id,
+                        "field_name": raw_name or group_id,
+                        "field_label": display_label,
+                        "page_index": page_idx,
+                        "norm_rect": norm_r,
+                        "pdf_rect": pdf_r,
+                        "options": [],
+                        "option_entries": [],
+                        "value": "",
+                        "is_read_only": is_read_only,
+                        "is_required": is_required,
+                        "xrefs": [],
+                    }
+                    radio_groups[group_id] = group
+
+                opt_idx = len(group["options"]) + 1
+                opt_val = _extract_radio_on_state(widget, opt_idx)
+                if opt_val in group["options"]:
+                    opt_val = f"{opt_val} ({opt_idx})"
+
+                is_checked = widget.field_value not in (None, "", False, "Off", "off")
+                if is_checked and not group["value"]:
+                    group["value"] = opt_val
+
+                group["options"].append(opt_val)
+                group["option_entries"].append(
+                    {
+                        "value": opt_val,
+                        "raw_on_state": widget.on_state(),
+                        "page_index": page_idx,
+                        "norm_rect": norm_r,
+                        "pdf_rect": pdf_r,
+                        "xref": int(widget.xref),
+                    }
+                )
+                group["xrefs"].append(int(widget.xref))
+                group["is_read_only"] = group["is_read_only"] and is_read_only
+                group["is_required"] = group["is_required"] or is_required
+                continue
+
+            base_key = raw_name or f"field_{widget.xref}"
+            field_key = base_key
+            if field_key in used_keys:
+                field_key = f"{base_key}__p{page_idx + 1}_{widget.xref}"
+            used_keys.add(field_key)
+
+            options: list[str] = []
+            if ftype == "checkbox":
+                val: object = widget.field_value not in (None, "", False, "Off", "off")
+            elif ftype in ("combobox", "listbox"):
+                options = _normalize_choice_values(getattr(widget, "choice_values", None))
+                val = "" if widget.field_value is None else str(widget.field_value)
+            elif ftype == "text":
+                val = "" if widget.field_value is None else str(widget.field_value)
+            else:
+                val = "" if widget.field_value is None else str(widget.field_value)
+
+            is_fillable = ftype in _FILLABLE_FORM_TYPES and not is_read_only
+            descriptors.append(
+                FormFieldDescriptor(
+                    key=field_key,
+                    field_name=raw_name or field_key,
+                    field_label=display_label,
+                    field_type=ftype,
+                    field_type_label=ftype_label,
+                    page_index=page_idx,
+                    norm_rect=norm_r,
+                    pdf_rect=pdf_r,
+                    value=val,
+                    default_value=val,
+                    options=options,
+                    is_read_only=is_read_only,
+                    is_required=is_required,
+                    is_multiline=is_multiline,
+                    is_password=is_password,
+                    is_fillable=is_fillable,
+                    xrefs=[int(widget.xref)],
+                )
+            )
+
+    for group in radio_groups.values():
+        key = group["key"]
+        if key in used_keys:
+            key = f"{key}__radio_{group['xrefs'][0]}"
+        used_keys.add(key)
+        descriptors.append(
+            FormFieldDescriptor(
+                key=key,
+                field_name=group["field_name"],
+                field_label=group["field_label"],
+                field_type="radio",
+                field_type_label="Radio Group",
+                page_index=group["page_index"],
+                norm_rect=group["norm_rect"],
+                pdf_rect=group["pdf_rect"],
+                value=group["value"],
+                default_value=group["value"],
+                options=group["options"],
+                option_entries=group["option_entries"],
+                is_read_only=group["is_read_only"],
+                is_required=group["is_required"],
+                is_fillable=not group["is_read_only"],
+                xrefs=group["xrefs"],
+            )
+        )
+
+    # Sort in natural reading / keyboard tab order: page, top-to-bottom (bucketed slightly), left-to-right
+    descriptors.sort(
+        key=lambda d: (d.page_index, round(d.pdf_rect[1] / 6.0), round(d.pdf_rect[0], 1), d.xrefs[0])
+    )
+    for idx, desc in enumerate(descriptors, start=1):
+        desc.tab_index = idx
+
+    return descriptors
+
+
+def _apply_values_to_open_doc(
+    doc: fitz.Document,
+    field_values: dict[str, object],
+    descriptors: list[FormFieldDescriptor] | None = None,
+) -> int:
+    """Apply field values onto an already-open PyMuPDF Document without saving to disk."""
+    if not field_values:
+        return 0
+
+    if descriptors is None:
+        descriptors = _collect_form_fields(doc)
+
+    desc_by_xref: dict[int, FormFieldDescriptor] = {}
+    for desc in descriptors:
+        for xref in desc.xrefs:
+            desc_by_xref[xref] = desc
+
+    updated_keys: set[str] = set()
+    radio_selected_handled: set[str] = set()
+
+    for page in doc:
+        for widget in page.widgets():
+            desc = desc_by_xref.get(int(widget.xref))
+            if desc is None or desc.is_read_only:
+                continue
+
+            if desc.key in field_values:
+                new_val = field_values[desc.key]
+            elif desc.field_name in field_values:
+                new_val = field_values[desc.field_name]
+            else:
+                continue
+
+            if desc.field_type == "text":
+                widget.field_value = "" if new_val is None else str(new_val)
+                widget.update()
+                updated_keys.add(desc.key)
+            elif desc.field_type == "checkbox":
+                checked = bool(new_val) and str(new_val).strip().lower() not in ("", "false", "off", "0")
+                on_state = widget.on_state()
+                if on_state and str(on_state) not in ("Off", "None"):
+                    widget.field_value = str(on_state) if checked else "Off"
+                else:
+                    widget.field_value = True if checked else False
+                widget.update()
+                updated_keys.add(desc.key)
+            elif desc.field_type in ("combobox", "listbox"):
+                widget.field_value = "" if new_val is None else str(new_val)
+                widget.update()
+                updated_keys.add(desc.key)
+            elif desc.field_type == "radio":
+                target_str = "" if new_val is None else str(new_val)
+                matched_entry = None
+                for entry in desc.option_entries:
+                    if entry["xref"] == int(widget.xref):
+                        matched_entry = entry
+                        break
+                if matched_entry and target_str and matched_entry["value"] == target_str:
+                    raw_on = matched_entry.get("raw_on_state")
+                    if raw_on and str(raw_on) not in ("Off", "None"):
+                        widget.field_value = str(raw_on)
+                    else:
+                        widget.field_value = True
+                    widget.update()
+                    updated_keys.add(desc.key)
+                    radio_selected_handled.add(desc.key)
+                elif not target_str and desc.key not in radio_selected_handled:
+                    widget.field_value = False
+                    widget.update()
+                    updated_keys.add(desc.key)
+
+    return len(updated_keys)
+
+
+def inspect_pdf_forms(source: str | Path) -> dict:
+    """Inspect a PDF for interactive AcroForm fields and return structured metadata."""
+    source_path = Path(source)
+    if not source_path.exists():
+        raise FileNotFoundError(f"Source file '{source}' not found.")
+
+    with fitz.open(str(source_path)) as doc:
+        if doc.is_encrypted and doc.needs_pass:
+            raise ValueError(f"Document '{source_path.name}' is password protected. Decrypt it before filling forms.")
+
+        fields = _collect_form_fields(doc)
+        type_counts: dict[str, int] = {}
+        fillable_count = 0
+        filled_count = 0
+        for f in fields:
+            type_counts[f.field_type] = type_counts.get(f.field_type, 0) + 1
+            if f.is_fillable:
+                fillable_count += 1
+                if f.field_type == "checkbox":
+                    if bool(f.value):
+                        filled_count += 1
+                elif str(f.value or "").strip():
+                    filled_count += 1
+
+        return {
+            "path": str(source_path),
+            "is_form_pdf": bool(doc.is_form_pdf) or len(fields) > 0,
+            "page_count": doc.page_count,
+            "total_fields": len(fields),
+            "fillable_count": fillable_count,
+            "filled_count": filled_count,
+            "type_counts": type_counts,
+            "fields": fields,
+        }
+
+
+def render_form_page_preview(
+    source: str | Path,
+    page_index: int = 0,
+    pending_values: dict[str, object] | None = None,
+    active_field_key: str | None = None,
+    max_width: int = 540,
+    max_height: int = 620,
+) -> dict:
+    """Render a form PDF page with live pending values applied in-memory and overlay coordinates."""
+    source_path = Path(source)
+    if not source_path.exists():
+        raise FileNotFoundError(f"Source file '{source}' not found.")
+
+    with fitz.open(str(source_path)) as doc:
+        if doc.is_encrypted and doc.needs_pass:
+            raise ValueError(f"Document '{source_path.name}' is password protected. Decrypt it first.")
+        if page_index < 0 or page_index >= doc.page_count:
+            raise IndexError(f"Page index {page_index} out of bounds (document has {doc.page_count} pages)")
+
+        descriptors = _collect_form_fields(doc)
+        if pending_values:
+            _apply_values_to_open_doc(doc, pending_values, descriptors=descriptors)
+
+        page = doc[page_index]
+        rect = page.rect
+        scale = min(max_width / max(rect.width, 1.0), max_height / max(rect.height, 1.0))
+        pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+
+        overlays: list[dict] = []
+        for desc in descriptors:
+            if desc.field_type == "radio":
+                for entry in desc.option_entries:
+                    if entry["page_index"] == page_index:
+                        overlays.append(
+                            {
+                                "key": desc.key,
+                                "field_type": desc.field_type,
+                                "label": f"{desc.field_label}: {entry['value']}",
+                                "option_value": entry["value"],
+                                "tab_index": desc.tab_index,
+                                "norm_rect": entry["norm_rect"],
+                                "is_active": desc.key == active_field_key,
+                                "is_read_only": desc.is_read_only,
+                                "is_required": desc.is_required,
+                            }
+                        )
+            elif desc.page_index == page_index:
+                overlays.append(
+                    {
+                        "key": desc.key,
+                        "field_type": desc.field_type,
+                        "label": desc.field_label,
+                        "option_value": None,
+                        "tab_index": desc.tab_index,
+                        "norm_rect": desc.norm_rect,
+                        "is_active": desc.key == active_field_key,
+                        "is_read_only": desc.is_read_only,
+                        "is_required": desc.is_required,
+                    }
+                )
+
+        return {
+            "png_bytes": pix.tobytes("png"),
+            "canvas_width": float(pix.width),
+            "canvas_height": float(pix.height),
+            "page_width": float(rect.width),
+            "page_height": float(rect.height),
+            "scale": float(scale),
+            "page_count": doc.page_count,
+            "overlays": overlays,
+        }
+
+
+def fill_and_save_pdf_form(
+    source: str | Path,
+    output_path: str | Path,
+    field_values: dict[str, object],
+    flatten: bool = False,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> dict:
+    """Fill AcroForm fields and save either an editable form PDF or a flattened read-only PDF."""
+    source_path = Path(source)
+    if not source_path.exists():
+        raise FileNotFoundError(f"Source file '{source}' not found.")
+
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    sha_before = _compute_file_sha256(source_path)
+
+    with fitz.open(str(source_path)) as doc:
+        if doc.is_encrypted and doc.needs_pass:
+            raise ValueError(f"Document '{source_path.name}' is password protected. Decrypt it before saving.")
+
+        if progress_callback:
+            progress_callback(1, 3, "Inspecting AcroForm widgets...")
+
+        descriptors = _collect_form_fields(doc)
+        if not descriptors:
+            raise ValueError("No interactive AcroForm fields were found in this document.")
+
+        if progress_callback:
+            progress_callback(2, 3, "Applying form field values...")
+
+        fields_updated = _apply_values_to_open_doc(doc, field_values, descriptors=descriptors)
+
+        if flatten:
+            if progress_callback:
+                progress_callback(3, 3, "Flattening form fields into static page streams...")
+            doc.bake(annots=False, widgets=True)
+        else:
+            if progress_callback:
+                progress_callback(3, 3, "Saving editable AcroForm PDF...")
+
+        doc.save(str(out), garbage=3, deflate=True)
+
+    # Verify saved result
+    with fitz.open(str(out)) as verified:
+        remaining_widgets = sum(len(list(p.widgets())) for p in verified)
+        is_form_after = bool(verified.is_form_pdf) or remaining_widgets > 0
+
+    sha_after = _compute_file_sha256(out)
+    return {
+        "output_path": str(out),
+        "flattened": bool(flatten),
+        "total_fields": len(descriptors),
+        "fields_updated": fields_updated,
+        "remaining_widgets": remaining_widgets,
+        "is_form_pdf_after": is_form_after,
+        "sha256_before": sha_before,
+        "sha256_after": sha_after,
+    }
+
+
+
 

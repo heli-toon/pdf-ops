@@ -305,9 +305,9 @@ Inspect, fill, and finalize PDF forms (`AcroForms`) directly inside PDF-Ops.
 - **Flattener**: PyMuPDF widget baking (`widget.update()` or page raster/vector flattening) into immutable PDF streams.
 
 ### 8.3 Deliverables
-- [ ] Form detection badge displaying count of fillable fields upon document load.
-- [ ] Auto-generated form sidebar mirroring document form structure.
-- [ ] "Save as Editable Form" and "Save & Flatten (Read-Only)" export actions.
+- [x] Form detection badge displaying count of fillable fields upon document load (both in [`ui_inspector.py`](ui_inspector.py) and [`ui_forms.py`](ui_forms.py)).
+- [x] Auto-generated form sidebar mirroring document form structure with tab-order navigation and interactive canvas hotspots in [`ui_forms.py`](ui_forms.py) & [`pdf_engine.py`](pdf_engine.py).
+- [x] "Save as Editable Form" and "Save & Flatten (Read-Only)" export actions verified across 89/89 passing unit tests in [`tests/test_phase8.py`](tests/test_phase8.py).
 
 ---
 

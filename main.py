@@ -18,6 +18,7 @@ from edit import PDFEditor
 from merge import PDFMerger
 from security import PDFSecurity
 from theme import ThemeTokens, make_badge, padding_only, padding_symmetric
+from ui_forms import FormFillerView
 from ui_inspector import DocumentInspector
 from ui_ocr import OfflineOCRView
 from ui_organizer import PageOrganizerView
@@ -54,6 +55,7 @@ class PDFOpsApp:
             ("ocr", "Offline OCR", ft.Icons.DOCUMENT_SCANNER, "100% on-device text recognition"),
             ("redaction", "Redact & Sanitize", ft.Icons.PRIVACY_TIP, "Permanent redaction & metadata purge"),
             ("signatures", "Sign & Stamp", ft.Icons.HISTORY_EDU, "Digital signatures & rubber stamps"),
+            ("forms", "Form Filler", ft.Icons.DYNAMIC_FORM, "Fill & flatten interactive AcroForms"),
         ]
 
     def main(self, page: ft.Page):
@@ -133,6 +135,14 @@ class PDFOpsApp:
             progress_text=self.progress_text,
             is_dark_supplier=lambda: self.is_dark_theme,
         )
+        self.forms_view = FormFillerView(
+            page=page,
+            app_state=self.state,
+            output_dir=self.output_dir,
+            progress_bar=self.progress_bar,
+            progress_text=self.progress_text,
+            is_dark_supplier=lambda: self.is_dark_theme,
+        )
 
         # Contextual Inspector (Pane 3)
         self.inspector = DocumentInspector(page, lambda: self.is_dark_theme)
@@ -141,6 +151,7 @@ class PDFOpsApp:
         self.state.subscribe(self.ocr_view.set_current_file)
         self.state.subscribe(self.redaction_view.set_current_file)
         self.state.subscribe(self.signatures_view.set_current_file)
+        self.state.subscribe(self.forms_view.set_current_file)
 
         # Setup Containers
         self.nav_rail_container = ft.Container(width=220, padding=12)
@@ -413,6 +424,7 @@ class PDFOpsApp:
             "ocr": self.ocr_view.build_ui,
             "redaction": self.redaction_view.build_ui,
             "signatures": self.signatures_view.build_ui,
+            "forms": self.forms_view.build_ui,
         }
 
         active_builder = tool_view_map.get(self.active_tool_id, self.quick_actions.build_ui)

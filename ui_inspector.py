@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import flet as ft
 import pymupdf as fitz
+from pdf_engine import inspect_pdf_forms
 from theme import ThemeTokens, make_badge, padding_only, padding_symmetric
 
 
@@ -30,6 +31,7 @@ class DocumentInspector:
         self.is_dark_supplier = is_dark_supplier
         self.current_file: str | None = None
         self.max_preview_pages = 12
+        self.last_form_summary: dict | None = None
 
         # Inspector root container
         self.container = ft.Container(
@@ -125,6 +127,9 @@ class DocumentInspector:
         page_count = 0
         is_encrypted = False
         page_dims_str = "N/A"
+        fillable_form_count = 0
+        total_form_count = 0
+        self.last_form_summary = None
         thumbnails: list[ft.Control] = []
 
         if is_pdf:
@@ -136,6 +141,15 @@ class DocumentInspector:
                         first_page = doc[0]
                         rect = first_page.rect
                         page_dims_str = f"{int(rect.width)} × {int(rect.height)} pt"
+
+                    if not (doc.is_encrypted and doc.needs_pass):
+                        try:
+                            form_summary = inspect_pdf_forms(file_path)
+                            self.last_form_summary = form_summary
+                            fillable_form_count = int(form_summary.get("fillable_count", 0))
+                            total_form_count = int(form_summary.get("total_fields", 0))
+                        except Exception:
+                            self.last_form_summary = None
 
                     # Generate in-memory byte previews for thumbnail reel
                     show_count = min(page_count, self.max_preview_pages)
@@ -171,10 +185,16 @@ class DocumentInspector:
                 )
 
         # Build Metadata Summary Grid
+        form_metric_val = (
+            f"{fillable_form_count} fillable"
+            if fillable_form_count > 0
+            else (f"{total_form_count} read-only" if total_form_count > 0 else "None")
+        )
         meta_items = [
             ("Size", file_size_str, ft.Icons.DATA_USAGE),
             ("Pages", f"{page_count}" if is_pdf else "1", ft.Icons.LAYERS_OUTLINED),
             ("Dimensions", page_dims_str, ft.Icons.ASPECT_RATIO),
+            ("AcroForm", form_metric_val if is_pdf else "N/A", ft.Icons.DYNAMIC_FORM),
         ]
 
         summary_controls = []
@@ -201,12 +221,29 @@ class DocumentInspector:
                 )
             )
 
-        # Header with Security Pill
+        # Header with Security & Form Detection Pills
         sec_badge = (
             make_badge("Encrypted", ThemeTokens.ACCENT_DANGER, ThemeTokens.DARK_TEXT_PRIMARY, ft.Icons.LOCK)
             if is_encrypted
             else make_badge("Accessible", ThemeTokens.ACCENT_SUCCESS, ThemeTokens.DARK_TEXT_PRIMARY, ft.Icons.LOCK_OPEN)
         )
+        form_badge = None
+        if is_pdf and not is_encrypted:
+            if fillable_form_count > 0:
+                label = f"{fillable_form_count} Form Field{'s' if fillable_form_count != 1 else ''}"
+                form_badge = make_badge(
+                    label,
+                    ThemeTokens.ACCENT_PRIMARY,
+                    ThemeTokens.DARK_TEXT_PRIMARY,
+                    ft.Icons.DYNAMIC_FORM,
+                )
+            else:
+                form_badge = make_badge(
+                    "No Form Fields",
+                    ThemeTokens.bg_hover(is_dark),
+                    ThemeTokens.text_muted(is_dark),
+                    ft.Icons.CHECK_BOX_OUTLINE_BLANK,
+                )
 
         return ft.Column(
             [
@@ -224,6 +261,7 @@ class DocumentInspector:
                     ],
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 ),
+                *([ft.Row([form_badge], spacing=6)] if form_badge is not None else []),
                 # File Name Pill
                 ft.Container(
                     content=ft.Row(
